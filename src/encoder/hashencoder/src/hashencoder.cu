@@ -22,9 +22,35 @@
 
 // requires CUDA >= 10 and ARCH >= 70
 // this is very slow compared to float or __half2, do not use!
-static inline  __device__ at::Half atomicAdd(at::Half *address, at::Half val) {
-  return atomicAdd(reinterpret_cast<__half*>(address), val);
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 700
+static inline __device__ at::Half atomicAdd(at::Half *address, at::Half val) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 600
+    return atomicAdd(reinterpret_cast<__half*>(address), val);
+#else
+    // Fallback for older architectures
+    float *address_as_float = reinterpret_cast<float*>(reinterpret_cast<char*>(address) - (reinterpret_cast<size_t>(address) & 2 ? 2 : 0));
+    float old = *address_as_float;
+    float assumed;
+    do {
+        assumed = old;
+        __half2 h2 = *reinterpret_cast<__half2*>(address_as_float);
+        __half hsum = __hadd(h2.x, val);
+        if (reinterpret_cast<size_t>(address) & 2) {
+            h2.y = hsum;
+        } else {
+            h2.x = hsum;
+        }
+        old = atomicCAS(address_as_float, assumed, *reinterpret_cast<float*>(&h2));
+    } while (assumed != old);
+    return __hadd(__low2half(*reinterpret_cast<__half2*>(&assumed)), val);
+#endif
 }
+#else
+// CPU fallback (should never be called)
+static inline __device__ at::Half atomicAdd(at::Half *address, at::Half val) {
+    return *address + val;
+}
+#endif
 
 
 template <typename T>
@@ -390,7 +416,7 @@ void hash_encode_forward(const at::Tensor inputs, const at::Tensor embeddings, c
     CHECK_IS_FLOATING(dy_dx);
 
     AT_DISPATCH_FLOATING_TYPES_AND_HALF(
-    inputs.type(), "hash_encode_forward", ([&] {
+    inputs.scalar_type(), "hash_encode_forward", ([&] {
         hash_encode_forward_cuda<scalar_t>(inputs.data_ptr<scalar_t>(), embeddings.data_ptr<scalar_t>(), offsets.data_ptr<int>(), outputs.data_ptr<scalar_t>(), B, D, C, L, H, calc_grad_inputs, dy_dx.data_ptr<scalar_t>());
     }));
 }
@@ -421,7 +447,7 @@ void hash_encode_backward(const at::Tensor grad, const at::Tensor inputs, const 
     CHECK_IS_FLOATING(grad_inputs);
 
     AT_DISPATCH_FLOATING_TYPES_AND_HALF(
-    grad.type(), "hash_encode_backward", ([&] {
+    grad.scalar_type(), "hash_encode_backward", ([&] {
         hash_encode_backward_cuda<scalar_t>(grad.data_ptr<scalar_t>(), inputs.data_ptr<scalar_t>(), embeddings.data_ptr<scalar_t>(), offsets.data_ptr<int>(), grad_embeddings.data_ptr<scalar_t>(), B, D, C, L, H, calc_grad_inputs, dy_dx.data_ptr<scalar_t>(), grad_inputs.data_ptr<scalar_t>());
     }));
     
