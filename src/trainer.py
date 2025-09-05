@@ -3,12 +3,10 @@ import os.path as osp
 import json
 import torch
 from torch.utils.tensorboard import SummaryWriter
-from tqdm import tqdm, trange
+from tqdm import tqdm
 from shutil import copyfile
 import numpy as np
-import random
 import math
-from torch.utils.data import TensorDataset, DataLoader
 import yaml
 
 from .dataset import TIGREDataset as Dataset
@@ -54,7 +52,12 @@ class Trainer:
             data = yaml.safe_load(handle)
 
         # data["projections"] = np.load(data["datadir"] + '_projs.npy')
-        data["projections"] = np.load(data['datadir'])
+        # Load projections if they exist, otherwise they will be generated from GT volume
+        if os.path.exists(data['datadir']):
+            data["projections"] = np.load(data['datadir'])
+            print(f"Loaded existing projections: {data['projections'].shape}")
+        else:
+            print("No existing projections found. Will generate from 3D volume.")
 
         # VARIABLE                                          DESCRIPTION                    UNITS
         # -------------------------------------------------------------------------------------
@@ -100,15 +103,18 @@ class Trainer:
         # proj_second = ct_projector.forward_project(phantom.squeeze(4))  # [bs, x, y, z] -> [bs, n, h, w]
         
         #####
-        # phantom = data["GT"]
-        # phantom = np.transpose(phantom, (1,2,0))[::,::-1,::-1]
-        # phantom = np.transpose(phantom, (2,1,0))[::-1,::,::].copy()
-        # phantom = torch.tensor(phantom, dtype=torch.float32)[None, ...] #.transpose(1,4).squeeze(4)
+        # Load 3D ground truth volume and generate projections
+        if "GT_volume_path" in data:
+            phantom = np.load(data["GT_volume_path"])
+            phantom = np.transpose(phantom, (1,2,0))[::,::-1,::-1]
+            phantom = np.transpose(phantom, (2,1,0))[::-1,::,::].copy()
+            phantom = torch.tensor(phantom, dtype=torch.float32)[None, ...]
 
-        # train_projs_one = self.ct_projector_first.forward_project(phantom)
-        # train_projs_two = self.ct_projector_second.forward_project(phantom)
+            train_projs_one = self.ct_projector_first.forward_project(phantom)
+            train_projs_two = self.ct_projector_second.forward_project(phantom)
 
-        # data["projections"] = torch.cat((train_projs_one,train_projs_two), 1)
+            data["projections"] = torch.cat((train_projs_one,train_projs_two), 1)
+            print(f"Generated projections from 3D volume: {data['projections'].shape}")
 
         # Dataset
         self.dataconfig = data

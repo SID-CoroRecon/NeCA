@@ -2,6 +2,7 @@
 
 # dataset
 datadir: ./data/CCTA_test/data.npy
+GT_volume_path: ./data/CCTA_test/gt_volume.npy  # Path to your 3D coronary volume
 numTrain: 2
 
 # System configuration
