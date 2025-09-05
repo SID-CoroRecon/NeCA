@@ -8,6 +8,7 @@ from shutil import copyfile
 import numpy as np
 import math
 import yaml
+import gc
 
 from .dataset import TIGREDataset as Dataset
 from .network import get_network
@@ -38,6 +39,14 @@ class Trainer:
         self.i_eval = cfg["log"]["i_eval"]
         self.i_save = cfg["log"]["i_save"]
         self.netchunk = cfg["render"]["netchunk"]
+        
+        # Memory optimization settings
+        self.use_mixed_precision = cfg.get("train", {}).get("mixed_precision", True)
+        self.gradient_accumulation_steps = cfg.get("train", {}).get("gradient_accumulation_steps", 1)
+        self.memory_efficient_eval = cfg.get("train", {}).get("memory_efficient_eval", True)
+        
+        # Initialize AMP scaler for mixed precision training
+        self.scaler = torch.cuda.amp.GradScaler(enabled=self.use_mixed_precision)
   
         # Log direcotry
         self.expdir = osp.join(cfg["exp"]["expdir"], cfg["exp"]["expname"])
@@ -133,8 +142,14 @@ class Trainer:
             self.grad_vars += list(self.net_fine.parameters())
         cfg["network"]["net_type"] = net_type
 
-        # Optimizer
-        self.optimizer = torch.optim.Adam(params=self.grad_vars, lr=cfg["train"]["lrate"], betas=(0.9, 0.999))
+        # Optimizer with memory-efficient settings
+        self.optimizer = torch.optim.AdamW(
+            params=self.grad_vars, 
+            lr=cfg["train"]["lrate"], 
+            betas=(0.9, 0.999),
+            weight_decay=cfg["train"].get("weight_decay", 1e-6),  # Add weight decay for regularization
+            eps=1e-8
+        )
         self.lr_scheduler = torch.optim.lr_scheduler.StepLR(
             optimizer=self.optimizer, step_size=cfg["train"]["lrate_step"], gamma=cfg["train"]["lrate_gamma"])
 
@@ -142,9 +157,11 @@ class Trainer:
         self.epoch_start = 0
         if cfg["train"]["resume"] and osp.exists(self.ckptdir):
             print(f"Load checkpoints from {self.ckptdir}.")
-            ckpt = torch.load(self.ckptdir)
+            ckpt = torch.load(self.ckptdir, map_location=device)  # Load to specific device
             self.epoch_start = ckpt["epoch"] + 1
             self.optimizer.load_state_dict(ckpt["optimizer"])
+            if "scaler" in ckpt and self.use_mixed_precision:
+                self.scaler.load_state_dict(ckpt["scaler"])
             self.global_step = self.epoch_start #* len(self.train_dloader)
             self.net.load_state_dict(ckpt["network"])
             if self.n_fine > 0:
@@ -163,9 +180,8 @@ class Trainer:
 
     def start(self):
         """
-        Main loop.
+        Main loop with memory optimizations.
         """
-
         iter_per_epoch = 1 #len(self.train_dloader)
         pbar = tqdm(total= iter_per_epoch * self.epochs, leave=True)
         if self.epoch_start > 0:
@@ -173,39 +189,65 @@ class Trainer:
 
         for idx_epoch in range(self.epoch_start, self.epochs+1):
             
-            # Evaluate
+            # Clear cache before evaluation
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                
+            # Evaluate with memory efficiency
             if (idx_epoch % self.i_eval == 0 or idx_epoch == self.epochs) and self.i_eval > 0:  
                 self.net.eval()
                 with torch.no_grad():
-                    # print(self.voxels.shape) #torch.Size([128, 128, 128, 3])
-                    image_pred = run_network(self.voxels, self.net_fine if self.net_fine is not None else self.net, self.netchunk)
+                    if self.memory_efficient_eval:
+                        # Process voxels in smaller chunks during evaluation
+                        eval_chunk_size = self.netchunk // 4  # Use smaller chunks for evaluation
+                        image_pred = self.run_network_chunked(
+                            self.voxels, 
+                            self.net_fine if self.net_fine is not None else self.net, 
+                            eval_chunk_size
+                        )
+                    else:
+                        image_pred = run_network(self.voxels, self.net_fine if self.net_fine is not None else self.net, self.netchunk)
+                    
                     image_pred = (image_pred.squeeze()).detach().cpu().numpy()
-
                     np.save(self.evaldir + "/" + str(idx_epoch), image_pred)
+                    
+                    # Free memory immediately after evaluation
+                    del image_pred
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
 
             # Train
-            # for data in self.train_dloader:
             self.global_step += 1
-            # Train
             self.net.train()
-            loss_train = self.train_step(self.train_dset, global_step=self.global_step, idx_epoch=idx_epoch)
-            pbar.set_description(f"epoch={idx_epoch}/{self.epochs}, {loss_train['loss']}, lr={self.optimizer.param_groups[0]['lr']:.3g}")
+            
+            # Memory-efficient training step
+            loss_train = self.train_step_memory_efficient(self.train_dset, global_step=self.global_step, idx_epoch=idx_epoch)
+            
+            pbar.set_description(f"epoch={idx_epoch}/{self.epochs}, {loss_train['loss']:.6f}, lr={self.optimizer.param_groups[0]['lr']:.3g}")
             pbar.update(1)
             
-            # Save
+            # Save checkpoints
             if (idx_epoch % self.i_save == 0 or idx_epoch == self.epochs) and self.i_save > 0 and idx_epoch > 0:
                 if osp.exists(self.ckptdir):
                     copyfile(self.ckptdir, self.ckptdir_backup)
                 tqdm.write(f"[SAVE] epoch: {idx_epoch}/{self.epochs}, path: {self.ckptdir}")
-                torch.save(
-                    {
-                        "epoch": idx_epoch,
-                        "network": self.net.state_dict(),
-                        "network_fine": self.net_fine.state_dict() if self.n_fine > 0 else None,
-                        "optimizer": self.optimizer.state_dict(),
-                    },
-                    self.ckptdir,
-                )
+                
+                # Save with memory-efficient settings
+                save_dict = {
+                    "epoch": idx_epoch,
+                    "network": self.net.state_dict(),
+                    "network_fine": self.net_fine.state_dict() if self.n_fine > 0 else None,
+                    "optimizer": self.optimizer.state_dict(),
+                }
+                
+                if self.use_mixed_precision:
+                    save_dict["scaler"] = self.scaler.state_dict()
+                    
+                torch.save(save_dict, self.ckptdir)
+                
+                # Clear cache after saving
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
 
             # Update lrate
             self.writer.add_scalar("train/lr", self.optimizer.param_groups[0]["lr"], self.global_step)
@@ -213,15 +255,70 @@ class Trainer:
 
         tqdm.write(f"Training complete! See logs in {self.expdir}")
 
+    def run_network_chunked(self, inputs, fn, chunk_size):
+        """
+        Memory-efficient network inference with smaller chunks.
+        """
+        uvt_flat = torch.reshape(inputs, [-1, inputs.shape[-1]])
+        output_chunks = []
+        
+        for i in range(0, uvt_flat.shape[0], chunk_size):
+            chunk = uvt_flat[i:i + chunk_size]
+            with torch.cuda.amp.autocast(enabled=self.use_mixed_precision, dtype=torch.float16):
+                chunk_output = fn(chunk)
+            output_chunks.append(chunk_output)
+            
+            # Clear intermediate tensors
+            del chunk, chunk_output
+            if torch.cuda.is_available() and i % (chunk_size * 4) == 0:  # Periodic cleanup
+                torch.cuda.empty_cache()
+        
+        out_flat = torch.cat(output_chunks, 0)
+        out = out_flat.reshape(list(inputs.shape[:-1]) + [out_flat.shape[-1]])
+        
+        # Clean up
+        del output_chunks, out_flat
+        
+        return out
+
+    def train_step_memory_efficient(self, data, global_step, idx_epoch):
+        """
+        Memory-efficient training step with gradient accumulation and mixed precision.
+        """
+        # Zero gradients
+        self.optimizer.zero_grad()
+        
+        total_loss = 0.0
+        
+        # Gradient accumulation loop
+        for acc_step in range(self.gradient_accumulation_steps):
+            with torch.cuda.amp.autocast(enabled=self.use_mixed_precision, dtype=torch.float16):
+                loss = self.compute_loss(data, global_step, idx_epoch)
+                scaled_loss = loss["loss"] / self.gradient_accumulation_steps
+                total_loss += loss["loss"].item()
+            
+            # Backward pass with gradient scaling
+            self.scaler.scale(scaled_loss).backward()
+            
+            # Clear intermediate tensors
+            del loss, scaled_loss
+            
+        # Optimizer step with gradient scaling
+        self.scaler.step(self.optimizer)
+        self.scaler.update()
+        
+        # Clear gradients and cache
+        self.optimizer.zero_grad()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        
+        return {"loss": total_loss / self.gradient_accumulation_steps}
+
     def train_step(self, data, global_step, idx_epoch):
         """
-        Training step
+        Legacy training step - kept for compatibility
         """
-        self.optimizer.zero_grad()
-        loss = self.compute_loss(data, global_step, idx_epoch)
-        loss["loss"].backward()
-        self.optimizer.step()
-        return loss
+        return self.train_step_memory_efficient(data, global_step, idx_epoch)
         
     def compute_loss(self, data, global_step, idx_epoch):
         """

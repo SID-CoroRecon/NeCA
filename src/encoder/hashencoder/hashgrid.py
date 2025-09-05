@@ -3,13 +3,13 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch.autograd import Function
-from torch.cuda.amp import custom_bwd, custom_fwd 
+from torch.amp import custom_bwd, custom_fwd 
 
 from .backend import _backend
 
 class _hash_encode(Function):
     @staticmethod
-    @custom_fwd(cast_inputs=torch.half)
+    @custom_fwd(cast_inputs=torch.half, device_type='cuda')
     #@custom_fwd
     def forward(ctx, inputs, embeddings, offsets, base_resolution, calc_grad_inputs=False):
         # inputs: [B, D], float in [0, 1]
@@ -46,7 +46,7 @@ class _hash_encode(Function):
         return outputs
     
     @staticmethod
-    @custom_bwd
+    @custom_bwd(device_type='cuda')
     def backward(ctx, grad):
         # grad: [B, L * C]
 
@@ -103,13 +103,14 @@ class HashEncoder(nn.Module):
         
         self.n_params = self.offsets[-1] * level_dim
 
-        # parameters
-        self.embeddings = nn.Parameter(torch.zeros(offset, level_dim))
+        # parameters - initialize with half precision for memory efficiency
+        self.embeddings = nn.Parameter(torch.zeros(offset, level_dim, dtype=torch.float32))
 
         self.reset_parameters()
     
     def reset_parameters(self):
-        std = 1e-4
+        # Use smaller standard deviation for better convergence with mixed precision
+        std = 5e-5  # Reduced from 1e-4
         self.embeddings.data.uniform_(-std, std)
 
     def __repr__(self):

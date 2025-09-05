@@ -1,10 +1,10 @@
 import torch
 import torch.nn as nn
-
+from torch.utils.checkpoint import checkpoint
 import numpy as np
 
 class DensityNetwork(nn.Module):
-    def __init__(self, encoder, bound=0.2, num_layers=8, hidden_dim=256, skips=[4], out_dim=1, last_activation="sigmoid"):
+    def __init__(self, encoder, bound=0.2, num_layers=8, hidden_dim=256, skips=[4], out_dim=1, last_activation="sigmoid", use_gradient_checkpointing=True):
         super().__init__()
         self.nunm_layers = num_layers
         self.hidden_dim = hidden_dim
@@ -12,6 +12,7 @@ class DensityNetwork(nn.Module):
         self.encoder = encoder
         self.in_dim = encoder.output_dim
         self.bound = bound
+        self.use_gradient_checkpointing = use_gradient_checkpointing
         
         # Linear layers
         self.layers = nn.ModuleList(
@@ -20,23 +21,22 @@ class DensityNetwork(nn.Module):
         self.layers.append(nn.Linear(hidden_dim, out_dim))
 
         # Activations
-        self.activations = nn.ModuleList([nn.LeakyReLU() for i in range(0, num_layers-1, 1)])
+        self.activations = nn.ModuleList([nn.LeakyReLU(inplace=True) for i in range(0, num_layers-1, 1)])  # Use inplace for memory
         if last_activation == "sigmoid":
             self.activations.append(nn.Sigmoid())
         elif last_activation == "relu":
-            self.activations.append(nn.LeakyReLU())
+            self.activations.append(nn.LeakyReLU(inplace=True))
         else:
             raise NotImplementedError("Unknown last activation")
 
-
-    def forward(self, x):
-        
-        x = self.encoder(x, self.bound)
-        
-        input_pts = x[..., :self.in_dim]
-
-        for i in range(len(self.layers)):
-
+    def _forward_layers(self, x, input_pts, start_layer=0, end_layer=None):
+        """
+        Forward pass through a subset of layers for gradient checkpointing.
+        """
+        if end_layer is None:
+            end_layer = len(self.layers)
+            
+        for i in range(start_layer, end_layer):
             linear = self.layers[i]
             activation = self.activations[i]
 
@@ -45,6 +45,28 @@ class DensityNetwork(nn.Module):
 
             x = linear(x)
             x = activation(x)
+        
+        return x
+
+    def forward(self, x):
+        # Encode input
+        x = self.encoder(x, self.bound)
+        input_pts = x[..., :self.in_dim]
+
+        if self.use_gradient_checkpointing and self.training:
+            # Use gradient checkpointing to save memory during training
+            # Split the network into checkpointed segments
+            mid_layer = len(self.layers) // 2
+            
+            # First half of layers
+            x = checkpoint(self._forward_layers, x, input_pts, 0, mid_layer, use_reentrant=False)
+            
+            # Second half of layers  
+            x = checkpoint(self._forward_layers, x, input_pts, mid_layer, len(self.layers), use_reentrant=False)
+            
+        else:
+            # Standard forward pass for inference
+            x = self._forward_layers(x, input_pts, 0, len(self.layers))
         
         return x
     

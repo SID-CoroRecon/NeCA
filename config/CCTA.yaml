@@ -10,6 +10,7 @@ network:
   out_dim: 1
   last_activation: sigmoid
   bound: 0.3
+  use_gradient_checkpointing: true  # Enable gradient checkpointing for memory efficiency
 encoder:
   encoding: hashgrid
   input_dim: 3
@@ -19,13 +20,17 @@ encoder:
   log2_hashmap_size: 19
 render:
   n_fine: 0
-  netchunk: 699060
+  netchunk: 262144  # Reduced from 699060 for better memory management (128^3 / 8)
 train:
   epoch: 5000
   lrate: 0.0001
   lrate_gamma: 0.1
   lrate_step: 5000
   resume: False
+  mixed_precision: true  # Enable mixed precision training
+  gradient_accumulation_steps: 1  # Can be increased if needed
+  weight_decay: 1e-6  # Add weight decay for regularization
+  memory_efficient_eval: true  # Use memory-efficient evaluation
 log:
   i_eval: 100
   i_save: 300

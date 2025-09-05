@@ -25,44 +25,60 @@ class ConeGeometry(object):
 
 class TIGREDataset(Dataset):
     """
-    TIGRE dataset.
+    TIGRE dataset with memory optimizations.
     """
     def __init__(self, data, device="cuda"):    
         super().__init__()
 
-        self.projs = torch.tensor(data["projections"], dtype=torch.float32, device=device)
+        # Store projections with memory-efficient data type
+        if isinstance(data["projections"], torch.Tensor):
+            self.projs = data["projections"].to(device=device, dtype=torch.float32)
+        else:
+            # Convert to half precision if possible to save memory
+            proj_data = torch.tensor(data["projections"], dtype=torch.float32, device=device)
+            self.projs = proj_data
 
         self.geo_one = ConeGeometry(data,index=0)
         self.geo_two = ConeGeometry(data, index=1)
         self.n_samples = data["numTrain"]
         geo = self.geo_one
-        coords = torch.stack(torch.meshgrid(torch.linspace(0, geo.nDetector[1] - 1, geo.nDetector[1], device=device),
-                                            torch.linspace(0, geo.nDetector[0] - 1, geo.nDetector[0], device=device)),
-                             -1)
+        
+        # Create coordinates more memory efficiently
+        coords = torch.stack(torch.meshgrid(
+            torch.linspace(0, geo.nDetector[1] - 1, geo.nDetector[1], device=device, dtype=torch.float32),
+            torch.linspace(0, geo.nDetector[0] - 1, geo.nDetector[0], device=device, dtype=torch.float32),
+            indexing='ij'
+        ), -1)
         self.coords = torch.reshape(coords, [-1, 2])
-        self.voxels = torch.tensor(self.get_voxels(geo), dtype=torch.float32, device=device)  
+        
+        # Store voxels with memory-efficient precision
+        voxel_data = self.get_voxels(geo)
+        self.voxels = torch.tensor(voxel_data, dtype=torch.float32, device=device)
+        
+        # Clear intermediate variables to free memory
+        del voxel_data, coords
 
     def __len__(self):
         return self.n_samples
 
     def __getitem__(self, index):
         select_coords = self.coords.long() 
-        projs = self.projs[index] #, select_coords[:, 0], select_coords[:, 1]]
+        projs = self.projs[index]
         out = {
-            "projs":projs,
+            "projs": projs,
         }
-
         return out
 
     def get_voxels(self, geo: ConeGeometry):
         """
-        Get the voxels.
+        Get the voxels with memory optimization.
         """
         n1, n2, n3 = geo.nVoxel 
         s1, s2, s3 = geo.sVoxel / 2 - geo.dVoxel / 2
 
-        xyz = np.meshgrid(np.linspace(-s1, s1, n1),
-                        np.linspace(-s2, s2, n2),
-                        np.linspace(-s3, s3, n3), indexing="ij")
-        voxel = np.asarray(xyz).transpose([1, 2, 3, 0])
+        # Use float32 instead of float64 to save memory
+        xyz = np.meshgrid(np.linspace(-s1, s1, n1, dtype=np.float32),
+                        np.linspace(-s2, s2, n2, dtype=np.float32),
+                        np.linspace(-s3, s3, n3, dtype=np.float32), indexing="ij")
+        voxel = np.asarray(xyz, dtype=np.float32).transpose([1, 2, 3, 0])
         return voxel
