@@ -1,7 +1,5 @@
 import torch
-import numpy as np
 import argparse
-import gc
 import os
 
 from src.config.configloading import load_config
@@ -58,7 +56,7 @@ class BasicTrainer(Trainer):
         projs = data.projs
         
         # Use autocast for mixed precision to save memory
-        with torch.cuda.amp.autocast(enabled=self.use_mixed_precision, dtype=torch.float16):
+        with torch.amp.autocast(enabled=self.use_mixed_precision, dtype=torch.float16, device_type='cuda'):
             # Process network in chunks to save memory
             image_pred = run_network(self.voxels, self.net, self.netchunk)
             train_output = image_pred.squeeze()[None, ...]

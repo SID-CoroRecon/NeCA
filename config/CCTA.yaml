@@ -29,7 +29,7 @@ train:
   resume: False
   mixed_precision: true  # Enable mixed precision training
   gradient_accumulation_steps: 1  # Can be increased if needed
-  weight_decay: 1e-6  # Add weight decay for regularization
+  weight_decay: 0.000001  # Add weight decay for regularization (1e-6)
   memory_efficient_eval: true  # Use memory-efficient evaluation
 log:
   i_eval: 100

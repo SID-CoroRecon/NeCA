@@ -8,7 +8,6 @@ from shutil import copyfile
 import numpy as np
 import math
 import yaml
-import gc
 
 from .dataset import TIGREDataset as Dataset
 from .network import get_network
@@ -46,7 +45,7 @@ class Trainer:
         self.memory_efficient_eval = cfg.get("train", {}).get("memory_efficient_eval", True)
         
         # Initialize AMP scaler for mixed precision training
-        self.scaler = torch.cuda.amp.GradScaler(enabled=self.use_mixed_precision)
+        self.scaler = torch.amp.GradScaler('cuda', enabled=self.use_mixed_precision)
   
         # Log direcotry
         self.expdir = osp.join(cfg["exp"]["expdir"], cfg["exp"]["expname"])
@@ -143,11 +142,15 @@ class Trainer:
         cfg["network"]["net_type"] = net_type
 
         # Optimizer with memory-efficient settings
+        weight_decay_val = cfg["train"].get("weight_decay", 1e-6)
+        if isinstance(weight_decay_val, str):
+            weight_decay_val = float(weight_decay_val)
+            
         self.optimizer = torch.optim.AdamW(
             params=self.grad_vars, 
             lr=cfg["train"]["lrate"], 
             betas=(0.9, 0.999),
-            weight_decay=cfg["train"].get("weight_decay", 1e-6),  # Add weight decay for regularization
+            weight_decay=weight_decay_val,  # Ensure proper type conversion
             eps=1e-8
         )
         self.lr_scheduler = torch.optim.lr_scheduler.StepLR(
@@ -157,15 +160,21 @@ class Trainer:
         self.epoch_start = 0
         if cfg["train"]["resume"] and osp.exists(self.ckptdir):
             print(f"Load checkpoints from {self.ckptdir}.")
-            ckpt = torch.load(self.ckptdir, map_location=device)  # Load to specific device
-            self.epoch_start = ckpt["epoch"] + 1
-            self.optimizer.load_state_dict(ckpt["optimizer"])
-            if "scaler" in ckpt and self.use_mixed_precision:
-                self.scaler.load_state_dict(ckpt["scaler"])
-            self.global_step = self.epoch_start #* len(self.train_dloader)
-            self.net.load_state_dict(ckpt["network"])
-            if self.n_fine > 0:
-                self.net_fine.load_state_dict(ckpt["network_fine"])
+            try:
+                ckpt = torch.load(self.ckptdir, map_location=device)  # Load to specific device
+                self.epoch_start = ckpt["epoch"] + 1
+                self.optimizer.load_state_dict(ckpt["optimizer"])
+                if "scaler" in ckpt and self.use_mixed_precision:
+                    self.scaler.load_state_dict(ckpt["scaler"])
+                self.global_step = self.epoch_start #* len(self.train_dloader)
+                self.net.load_state_dict(ckpt["network"])
+                if self.n_fine > 0 and "network_fine" in ckpt and ckpt["network_fine"] is not None:
+                    self.net_fine.load_state_dict(ckpt["network_fine"])
+                print(f"Successfully loaded checkpoint from epoch {ckpt['epoch']}")
+            except Exception as e:
+                print(f"Warning: Failed to load checkpoint: {e}")
+                print("Starting training from scratch.")
+                self.epoch_start = 0
 
         # Summary writer
         self.writer = SummaryWriter(self.expdir)
@@ -223,6 +232,9 @@ class Trainer:
             # Memory-efficient training step
             loss_train = self.train_step_memory_efficient(self.train_dset, global_step=self.global_step, idx_epoch=idx_epoch)
             
+            # Update learning rate after optimizer step
+            self.lr_scheduler.step()
+            
             pbar.set_description(f"epoch={idx_epoch}/{self.epochs}, {loss_train['loss']:.6f}, lr={self.optimizer.param_groups[0]['lr']:.3g}")
             pbar.update(1)
             
@@ -249,9 +261,8 @@ class Trainer:
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
 
-            # Update lrate
+            # Log learning rate
             self.writer.add_scalar("train/lr", self.optimizer.param_groups[0]["lr"], self.global_step)
-            self.lr_scheduler.step()
 
         tqdm.write(f"Training complete! See logs in {self.expdir}")
 
@@ -264,7 +275,7 @@ class Trainer:
         
         for i in range(0, uvt_flat.shape[0], chunk_size):
             chunk = uvt_flat[i:i + chunk_size]
-            with torch.cuda.amp.autocast(enabled=self.use_mixed_precision, dtype=torch.float16):
+            with torch.amp.autocast('cuda', enabled=self.use_mixed_precision, dtype=torch.float16):
                 chunk_output = fn(chunk)
             output_chunks.append(chunk_output)
             
@@ -292,7 +303,7 @@ class Trainer:
         
         # Gradient accumulation loop
         for acc_step in range(self.gradient_accumulation_steps):
-            with torch.cuda.amp.autocast(enabled=self.use_mixed_precision, dtype=torch.float16):
+            with torch.amp.autocast('cuda', enabled=self.use_mixed_precision, dtype=torch.float16):
                 loss = self.compute_loss(data, global_step, idx_epoch)
                 scaled_loss = loss["loss"] / self.gradient_accumulation_steps
                 total_loss += loss["loss"].item()
