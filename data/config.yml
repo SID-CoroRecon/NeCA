@@ -1,8 +1,7 @@
-# Parameters to setup CT simulation.
+# Parameters to setup CT simulation geometry only.
+# Data paths are now handled in CCTA.yaml for better organization.
 
-# dataset
-datadir: ./data/CCTA_test/data.npy
-GT_volume_path: ./data/CCTA_test/gt_volume.npy  # Path to your 3D coronary volume
+# Training parameters
 numTrain: 2
 
 # System configuration

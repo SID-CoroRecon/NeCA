@@ -34,12 +34,17 @@ def print_memory_stats():
         print(f"GPU Memory - Allocated: {allocated:.2f} GB, Reserved: {reserved:.2f} GB")
 
 class BasicTrainer(Trainer):
-    def __init__(self):
+    def __init__(self, config=None, device_override=None):
         """
         Basic network trainer with memory optimizations.
         """
-        super().__init__(cfg, device)
-        print(f"[Start] exp: {cfg['exp']['expname']}, net: Basic network")
+        # Use provided config or default global config
+        train_cfg = config if config is not None else cfg
+        train_device = device_override if device_override is not None else device
+        
+        super().__init__(train_cfg, train_device)
+        print(f"[Start] exp: {train_cfg['exp']['expname']}, net: Basic network")
+        print(f"Model ID: {train_cfg['exp'].get('current_model_id', 'default')}")
 
         self.l2_loss = torch.nn.MSELoss(reduction='mean')
         

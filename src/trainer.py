@@ -47,25 +47,38 @@ class Trainer:
         # Initialize AMP scaler for mixed precision training
         self.scaler = torch.amp.GradScaler('cuda', enabled=self.use_mixed_precision)
   
-        # Log direcotry
+        # Log directory and output paths
         self.expdir = osp.join(cfg["exp"]["expdir"], cfg["exp"]["expname"])
         self.ckptdir = osp.join(self.expdir, "ckpt.tar")
         self.ckptdir_backup = osp.join(self.expdir, "ckpt_backup.tar")
         self.evaldir = osp.join(self.expdir, "eval")
+        
+        # Setup output directories for batch processing
+        self.output_recon_dir = cfg["exp"].get("output_recon_dir", "./logs/reconstructions/")
+        self.current_model_id = cfg["exp"].get("current_model_id", 1)
         os.makedirs(self.evaldir, exist_ok=True)
+        os.makedirs(self.output_recon_dir, exist_ok=True)
 
         #######################################
+        # Load CT geometry configuration
         configPath = cfg['exp']['dataconfig']
         with open(configPath, "r") as handle:
             data = yaml.safe_load(handle)
 
-        # data["projections"] = np.load(data["datadir"] + '_projs.npy')
-        # Load projections if they exist, otherwise they will be generated from GT volume
-        if os.path.exists(data['datadir']):
-            data["projections"] = np.load(data['datadir'])
-            print(f"Loaded existing projections: {data['projections'].shape}")
-        else:
-            print("No existing projections found. Will generate from 3D volume.")
+        # Setup data paths from main config (CCTA.yaml) - much cleaner!
+        input_data_dir = cfg["exp"].get("input_data_dir", "./data/GT_volumes/")
+        gt_volume_filename = f"{self.current_model_id}.npy"
+        gt_volume_path = osp.join(input_data_dir, gt_volume_filename)
+        
+        print(f"Processing model {self.current_model_id}")
+        print(f"GT volume path: {gt_volume_path}")
+
+        # Check if ground truth volume exists
+        if not os.path.exists(gt_volume_path):
+            raise FileNotFoundError(f"Ground truth volume not found: {gt_volume_path}")
+
+        # No need for datadir anymore - we generate projections from GT volume directly
+        print("Generating projections from 3D ground truth volume...")
 
         # VARIABLE                                          DESCRIPTION                    UNITS
         # -------------------------------------------------------------------------------------
@@ -111,18 +124,17 @@ class Trainer:
         # proj_second = ct_projector.forward_project(phantom.squeeze(4))  # [bs, x, y, z] -> [bs, n, h, w]
         
         #####
-        # Load 3D ground truth volume and generate projections
-        if "GT_volume_path" in data:
-            phantom = np.load(data["GT_volume_path"])
-            phantom = np.transpose(phantom, (1,2,0))[::,::-1,::-1]
-            phantom = np.transpose(phantom, (2,1,0))[::-1,::,::].copy()
-            phantom = torch.tensor(phantom, dtype=torch.float32)[None, ...]
+        # Load 3D ground truth volume and generate projections (simplified)
+        phantom = np.load(gt_volume_path)
+        phantom = np.transpose(phantom, (1,2,0))[::,::-1,::-1]
+        phantom = np.transpose(phantom, (2,1,0))[::-1,::,::].copy()
+        phantom = torch.tensor(phantom, dtype=torch.float32)[None, ...]
 
-            train_projs_one = self.ct_projector_first.forward_project(phantom)
-            train_projs_two = self.ct_projector_second.forward_project(phantom)
+        train_projs_one = self.ct_projector_first.forward_project(phantom)
+        train_projs_two = self.ct_projector_second.forward_project(phantom)
 
-            data["projections"] = torch.cat((train_projs_one,train_projs_two), 1)
-            print(f"Generated projections from 3D volume: {data['projections'].shape}")
+        data["projections"] = torch.cat((train_projs_one,train_projs_two), 1)
+        print(f"Generated projections from 3D volume: {data['projections'].shape}")
 
         # Dataset
         self.dataconfig = data
@@ -202,8 +214,17 @@ class Trainer:
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
                 
-            # Evaluate with memory efficiency
-            if (idx_epoch % self.i_eval == 0 or idx_epoch == self.epochs) and self.i_eval > 0:  
+            # Evaluate and save final results
+            save_final = self.conf.get("log", {}).get("save_final_model", True)
+            save_intermediate = self.conf.get("log", {}).get("save_intermediate", False)
+            
+            should_evaluate = False
+            if idx_epoch == self.epochs and save_final:
+                should_evaluate = True  # Always evaluate at final epoch if save_final is True
+            elif save_intermediate and (idx_epoch % self.i_eval == 0) and self.i_eval > 0:
+                should_evaluate = True  # Evaluate intermediate epochs if save_intermediate is True
+                
+            if should_evaluate:  
                 self.net.eval()
                 with torch.no_grad():
                     if self.memory_efficient_eval:
@@ -218,7 +239,29 @@ class Trainer:
                         image_pred = run_network(self.voxels, self.net_fine if self.net_fine is not None else self.net, self.netchunk)
                     
                     image_pred = (image_pred.squeeze()).detach().cpu().numpy()
-                    np.save(self.evaldir + "/" + str(idx_epoch), image_pred)
+                    
+                    # Save with custom naming
+                    if idx_epoch == self.epochs and save_final:
+                        # Final epoch: save with custom reconstruction name
+                        recon_filename = f"recon_{self.current_model_id}.npy"
+                        recon_path = osp.join(self.output_recon_dir, recon_filename)
+                        np.save(recon_path, image_pred)
+                        print(f"Saved final reconstruction: {recon_path}")
+                        
+                        # Also save network weights with custom name
+                        network_filename = f"network_{self.current_model_id}.pth"
+                        network_path = osp.join(self.output_recon_dir, network_filename)
+                        torch.save({
+                            'network': self.net.state_dict(),
+                            'network_fine': self.net_fine.state_dict() if self.n_fine > 0 else None,
+                            'model_id': self.current_model_id,
+                            'epoch': idx_epoch,
+                            'config': self.conf
+                        }, network_path)
+                        print(f"Saved final network: {network_path}")
+                    else:
+                        # Intermediate epochs: save in eval directory
+                        np.save(self.evaldir + "/" + str(idx_epoch), image_pred)
                     
                     # Free memory immediately after evaluation
                     del image_pred
@@ -238,8 +281,14 @@ class Trainer:
             pbar.set_description(f"epoch={idx_epoch}/{self.epochs}, {loss_train['loss']:.6f}, lr={self.optimizer.param_groups[0]['lr']:.3g}")
             pbar.update(1)
             
-            # Save checkpoints
-            if (idx_epoch % self.i_save == 0 or idx_epoch == self.epochs) and self.i_save > 0 and idx_epoch > 0:
+            # Save checkpoints (only if save_intermediate is True or at final epoch)
+            should_save_checkpoint = False
+            if idx_epoch == self.epochs and save_final:
+                should_save_checkpoint = True  # Always save at final epoch if save_final is True
+            elif save_intermediate and (idx_epoch % self.i_save == 0) and self.i_save > 0 and idx_epoch > 0:
+                should_save_checkpoint = True  # Save intermediate checkpoints if save_intermediate is True
+                
+            if should_save_checkpoint:
                 if osp.exists(self.ckptdir):
                     copyfile(self.ckptdir, self.ckptdir_backup)
                 tqdm.write(f"[SAVE] epoch: {idx_epoch}/{self.epochs}, path: {self.ckptdir}")

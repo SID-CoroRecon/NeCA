@@ -2,6 +2,11 @@ exp:
   expname: CCTA
   expdir: ./logs/
   dataconfig: ./data/config.yml
+  # Batch processing configuration
+  input_data_dir: ./data/GT_volumes/  # Directory containing ground truth volumes (1.npy, 2.npy, etc.)
+  output_recon_dir: ./logs/reconstructions/  # Directory to save reconstructions (recon_1.npy, etc.)
+  model_numbers: [1, 2, 3, 4, 5]  # List of model numbers to train on (corresponds to {number}.npy files)
+  current_model_id: 1  # Current model being processed (will be updated automatically)
 network:
   net_type: mlp
   num_layers: 8
@@ -20,7 +25,7 @@ encoder:
   log2_hashmap_size: 19
 render:
   n_fine: 0
-  netchunk: 262144  # Reduced from 699060 for better memory management (128^3 / 8)
+  netchunk: 699060
 train:
   epoch: 5000
   lrate: 0.0001
@@ -32,5 +37,7 @@ train:
   weight_decay: 0.000001  # Add weight decay for regularization (1e-6)
   memory_efficient_eval: true  # Use memory-efficient evaluation
 log:
-  i_eval: 100
-  i_save: 300
+  i_eval: 5000  # Only evaluate at final epoch
+  i_save: 5000  # Only save checkpoint at final epoch
+  save_final_model: true  # Save final 3D reconstruction and network
+  save_intermediate: false  # Don't save intermediate results
