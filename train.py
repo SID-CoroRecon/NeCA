@@ -83,7 +83,8 @@ class BasicTrainer(Trainer):
 
         return loss
 
-print("Setting up trainer...")
-trainer = BasicTrainer()
-print("Starting training...")
-trainer.start()
+if __name__ == "__main__":
+    print("Setting up trainer...")
+    trainer = BasicTrainer()
+    print("Starting training...")
+    trainer.start()
