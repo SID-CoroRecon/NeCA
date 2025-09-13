@@ -188,6 +188,13 @@ def compute_all_metrics(
             threshold_output=threshold_output, 
             threshold_label=threshold_label
         )
+        # Add additional useful metrics
+        label_bin = (label >= threshold_label).astype(np.uint8)
+        output_bin = (output >= threshold_output).astype(np.uint8)
+        
+        metrics['label_volume'] = np.sum(label_bin) * np.prod(voxel_spacing)  # mm³
+        metrics['output_volume'] = np.sum(output_bin) * np.prod(voxel_spacing)  # mm³
+        metrics['volume_ratio'] = metrics['output_volume'] / metrics['label_volume'] if metrics['label_volume'] > 0 else np.inf
         
     except Exception as e:
         print(f"Error computing metrics: {str(e)}")
@@ -392,8 +399,11 @@ def batch_evaluate_models(
     df_results.to_json(json_path, orient='records', indent=2)
     print(f"💾 Saved JSON results: {json_path}")
     
-    # Summary statistics
+    # Summary statistics - only for successful evaluations
     if successful_evaluations > 0:
+        # Filter only successful evaluations for statistics
+        successful_results = df_results[df_results['evaluation_success'] == True]
+        
         summary_stats = {
             'timestamp': timestamp,
             'total_models': len(model_numbers),
@@ -406,14 +416,14 @@ def batch_evaluate_models(
                 'apply_rotation': apply_rotation
             },
             'statistics': {
-                'dice_mean': float(df_results['dice'].mean()),
-                'dice_std': float(df_results['dice'].std()),
-                'ot_1mm_mean': float(df_results['ot_1mm'].mean()),
-                'ot_1mm_std': float(df_results['ot_1mm'].std()),
-                'ot_2mm_mean': float(df_results['ot_2mm'].mean()),
-                'ot_2mm_std': float(df_results['ot_2mm'].std()),
-                'chamfer_distance_mean': float(df_results['chamfer_distance'].mean()),
-                'chamfer_distance_std': float(df_results['chamfer_distance'].std())
+                'dice_mean': float(successful_results['dice'].mean()),
+                'dice_std': float(successful_results['dice'].std()),
+                'ot_1mm_mean': float(successful_results['ot_1mm'].mean()),
+                'ot_1mm_std': float(successful_results['ot_1mm'].std()),
+                'ot_2mm_mean': float(successful_results['ot_2mm'].mean()),
+                'ot_2mm_std': float(successful_results['ot_2mm'].std()),
+                'chamfer_distance_mean': float(successful_results['chamfer_distance'].mean()),
+                'chamfer_distance_std': float(successful_results['chamfer_distance'].std())
             }
         }
         
@@ -431,11 +441,14 @@ def batch_evaluate_models(
     print(f"Failed: {failed_evaluations}")
     
     if successful_evaluations > 0:
-        print(f"\n📊 Performance Statistics:")
-        print(f"Dice Score:       {df_results['dice'].mean():.4f} ± {df_results['dice'].std():.4f}")
-        print(f"Ot(1mm):          {df_results['ot_1mm'].mean():.4f} ± {df_results['ot_1mm'].std():.4f}")
-        print(f"Ot(2mm):          {df_results['ot_2mm'].mean():.4f} ± {df_results['ot_2mm'].std():.4f}")
-        print(f"Chamfer Dist:     {df_results['chamfer_distance'].mean():.4f} ± {df_results['chamfer_distance'].std():.4f} mm")
+        # Filter only successful evaluations for statistics display
+        successful_results = df_results[df_results['evaluation_success'] == True]
+        
+        print(f"\n📊 Performance Statistics (based on {successful_evaluations} successful evaluations):")
+        print(f"Dice Score:       {successful_results['dice'].mean():.4f} ± {successful_results['dice'].std():.4f}")
+        print(f"Ot(1mm):          {successful_results['ot_1mm'].mean():.4f} ± {successful_results['ot_1mm'].std():.4f}")
+        print(f"Ot(2mm):          {successful_results['ot_2mm'].mean():.4f} ± {successful_results['ot_2mm'].std():.4f}")
+        print(f"Chamfer Dist:     {successful_results['chamfer_distance'].mean():.4f} ± {successful_results['chamfer_distance'].std():.4f} mm")
     
     if failed_evaluations > 0:
         print(f"\n❌ Failed models: {df_results[~df_results['evaluation_success']]['model_id'].tolist()}")
