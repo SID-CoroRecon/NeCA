@@ -1,7 +1,7 @@
 exp:
   expname: CCTA
   expdir: ./logs/
-  dataconfig: ./data/config.yml
+  dataconfig: ./config/config.yml
   # Batch processing configuration
   input_data_dir: ./data/GT_volumes/  # Directory containing ground truth volumes (1.npy, 2.npy, etc.)
   output_recon_dir: ./logs/reconstructions/  # Directory to save reconstructions (recon_1.npy, etc.)
