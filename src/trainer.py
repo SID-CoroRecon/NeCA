@@ -8,6 +8,7 @@ from shutil import copyfile
 import numpy as np
 import math
 import yaml
+import matplotlib.pyplot as plt
 
 from .dataset import TIGREDataset as Dataset
 from .network import get_network
@@ -191,6 +192,9 @@ class Trainer:
         # Summary writer
         self.writer = SummaryWriter(self.expdir)
         self.writer.add_text("parameters", self.args2string(cfg), global_step=0)
+        
+        # Loss tracking for plotting
+        self.training_losses = []
 
     def args2string(self, hp):
         """
@@ -198,6 +202,26 @@ class Trainer:
         """
         json_hp = json.dumps(hp, indent=2)
         return "".join("\t" + line for line in json_hp.splitlines(True))
+    
+    def save_loss_plot(self):
+        """
+        Save training loss plot for current model.
+        """
+        if len(self.training_losses) == 0:
+            return
+            
+        plt.figure(figsize=(10, 6))
+        plt.plot(self.training_losses, 'b-', linewidth=1.5)
+        plt.xlabel('Epoch')
+        plt.ylabel('Training Loss')
+        plt.title(f'Training Loss - Model {self.current_model_id}')
+        plt.grid(True, alpha=0.3)
+        plt.yscale('log')  # Log scale for better visualization
+        
+        loss_plot_path = osp.join(self.output_recon_dir, f"loss_plot_{self.current_model_id}.png")
+        plt.savefig(loss_plot_path, dpi=150, bbox_inches='tight')
+        plt.close()
+        print(f"Saved loss plot: {loss_plot_path}")
 
     def start(self):
         """
@@ -248,6 +272,52 @@ class Trainer:
                         np.save(recon_path, image_pred)
                         print(f"Saved final reconstruction: {recon_path}")
                         
+                        # Save ground truth 3D model
+                        gt_volume_filename = f"gt_volume_{self.current_model_id}.npy"
+                        gt_volume_path = osp.join(self.output_recon_dir, gt_volume_filename)
+                        input_data_dir = self.conf["exp"].get("input_data_dir", "./data/GT_volumes/")
+                        original_gt_path = osp.join(input_data_dir, f"{self.current_model_id}.npy")
+                        gt_volume = np.load(original_gt_path)
+                        np.save(gt_volume_path, gt_volume)
+                        print(f"Saved ground truth 3D model: {gt_volume_path}")
+                        
+                        # Save ground truth projections
+                        gt_projs_filename = f"gt_projections_{self.current_model_id}.npy"
+                        gt_projs_path = osp.join(self.output_recon_dir, gt_projs_filename)
+                        gt_projs_data = self.train_dset.projs.detach().cpu().numpy()
+                        np.save(gt_projs_path, gt_projs_data)
+                        print(f"Saved ground truth projections: {gt_projs_path}")
+                        
+                        # Save ground truth projections as images
+                        for i in range(gt_projs_data.shape[1]):
+                            proj_img = gt_projs_data[0, i]  # Get projection i
+                            # Normalize to 0-255 range
+                            proj_img_norm = ((proj_img - proj_img.min()) / (proj_img.max() - proj_img.min()) * 255).astype(np.uint8)
+                            gt_proj_img_path = osp.join(self.output_recon_dir, f"gt_projection_{self.current_model_id}_view_{i+1}.png")
+                            plt.imsave(gt_proj_img_path, proj_img_norm, cmap='gray')
+                            print(f"Saved ground truth projection image {i+1}: {gt_proj_img_path}")
+                        
+                        # Generate and save predicted projections from final reconstruction
+                        image_pred_tensor = torch.tensor(image_pred, dtype=torch.float32, device=self.train_dset.projs.device)[None, ...]
+                        pred_projs_one = self.ct_projector_first.forward_project(image_pred_tensor)
+                        pred_projs_two = self.ct_projector_second.forward_project(image_pred_tensor)
+                        pred_projs = torch.cat((pred_projs_one, pred_projs_two), 1)
+                        
+                        pred_projs_filename = f"pred_projections_{self.current_model_id}.npy"
+                        pred_projs_path = osp.join(self.output_recon_dir, pred_projs_filename)
+                        pred_projs_data = pred_projs.detach().cpu().numpy()
+                        np.save(pred_projs_path, pred_projs_data)
+                        print(f"Saved predicted projections: {pred_projs_path}")
+                        
+                        # Save predicted projections as images
+                        for i in range(pred_projs_data.shape[1]):
+                            proj_img = pred_projs_data[0, i]  # Get projection i
+                            # Normalize to 0-255 range
+                            proj_img_norm = ((proj_img - proj_img.min()) / (proj_img.max() - proj_img.min()) * 255).astype(np.uint8)
+                            pred_proj_img_path = osp.join(self.output_recon_dir, f"pred_projection_{self.current_model_id}_view_{i+1}.png")
+                            plt.imsave(pred_proj_img_path, proj_img_norm, cmap='gray')
+                            print(f"Saved predicted projection image {i+1}: {pred_proj_img_path}")
+                        
                         # Also save network weights with custom name
                         network_filename = f"network_{self.current_model_id}.pth"
                         network_path = osp.join(self.output_recon_dir, network_filename)
@@ -274,6 +344,9 @@ class Trainer:
             
             # Memory-efficient training step
             loss_train = self.train_step_memory_efficient(self.train_dset, global_step=self.global_step, idx_epoch=idx_epoch)
+            
+            # Track loss for plotting
+            self.training_losses.append(loss_train['loss'])
             
             # Update learning rate after optimizer step
             self.lr_scheduler.step()
@@ -313,6 +386,9 @@ class Trainer:
             # Log learning rate
             self.writer.add_scalar("train/lr", self.optimizer.param_groups[0]["lr"], self.global_step)
 
+        # Save loss plot after training completion
+        self.save_loss_plot()
+        
         tqdm.write(f"Training complete! See logs in {self.expdir}")
 
     def run_network_chunked(self, inputs, fn, chunk_size):
