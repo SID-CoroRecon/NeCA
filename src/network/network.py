@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 from torch.utils.checkpoint import checkpoint
-import numpy as np
 
 class DensityNetwork(nn.Module):
     def __init__(self, encoder, bound=0.2, num_layers=8, hidden_dim=256, skips=[4], out_dim=1, last_activation="sigmoid", use_gradient_checkpointing=True):
@@ -24,8 +23,12 @@ class DensityNetwork(nn.Module):
         self.activations = nn.ModuleList([nn.LeakyReLU(inplace=True) for i in range(0, num_layers-1, 1)])  # Use inplace for memory
         if last_activation == "sigmoid":
             self.activations.append(nn.Sigmoid())
+        elif last_activation == "tanh":
+            self.activations.append(nn.Tanh())
         elif last_activation == "relu":
             self.activations.append(nn.LeakyReLU(inplace=True))
+        elif last_activation == "linear" or last_activation == "none":
+            self.activations.append(nn.Identity())  # No activation - pure regression
         else:
             raise NotImplementedError("Unknown last activation")
 

@@ -37,6 +37,15 @@ class TIGREDataset(Dataset):
             # Convert to half precision if possible to save memory
             proj_data = torch.tensor(data["projections"], dtype=torch.float32, device=device)
             self.projs = proj_data
+            
+        # Store SDF projections if available
+        self.sdf_projs = None
+        if "sdf_projections" in data:
+            if isinstance(data["sdf_projections"], torch.Tensor):
+                self.sdf_projs = data["sdf_projections"].to(device=device, dtype=torch.float32)
+            else:
+                sdf_proj_data = torch.tensor(data["sdf_projections"], dtype=torch.float32, device=device)
+                self.sdf_projs = sdf_proj_data
 
         self.geo_one = ConeGeometry(data,index=0)
         self.geo_two = ConeGeometry(data, index=1)
@@ -67,6 +76,9 @@ class TIGREDataset(Dataset):
         out = {
             "projs": projs,
         }
+        # Add SDF projections if available
+        if self.sdf_projs is not None:
+            out["sdf_projs"] = self.sdf_projs[index]
         return out
 
     def get_voxels(self, geo: ConeGeometry):

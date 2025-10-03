@@ -13,7 +13,7 @@ network:
   hidden_dim: 256
   skips: [4]
   out_dim: 1
-  last_activation: sigmoid
+  last_activation: linear
   bound: 0.3
   use_gradient_checkpointing: true  # Enable gradient checkpointing for memory efficiency
 encoder:
@@ -36,6 +36,11 @@ train:
   gradient_accumulation_steps: 1  # Can be increased if needed
   weight_decay: 0.000001  # Add weight decay for regularization (1e-6)
   memory_efficient_eval: true  # Use memory-efficient evaluation
+  # SDF-related parameters
+  use_sdf: true  # Use SDF representation instead of occupancy
+  sdf_alpha: 50.0  # Sharpness parameter for SDF to occupancy conversion
+  eikonal_weight: 0.1  # Weight for Eikonal regularization loss
+  sdf_loss_weight: 1.0  # Weight for 2D SDF projection loss
 log:
   i_eval: 5000  # Only evaluate at final epoch
   i_save: 5000  # Only save checkpoint at final epoch

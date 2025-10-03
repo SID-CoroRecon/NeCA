@@ -1,19 +1,18 @@
 import os
-import os.path as osp
-import json
-import torch
-from torch.utils.tensorboard import SummaryWriter
-from tqdm import tqdm
-from shutil import copyfile
-import numpy as np
 import math
 import yaml
+import json
+import torch
+import numpy as np
+import os.path as osp
+from tqdm import tqdm
+from shutil import copyfile
 import matplotlib.pyplot as plt
 
-from .dataset import TIGREDataset as Dataset
 from .network import get_network
 from .encoder import get_encoder
 from src.render import run_network
+from .dataset import TIGREDataset as Dataset
 
 from src.render.ct_geometry_projector import ConeBeam3DProjector
 from odl.tomo.util.utility import axis_rotation, rotation_matrix_from_to
@@ -136,6 +135,13 @@ class Trainer:
 
         data["projections"] = torch.cat((train_projs_one,train_projs_two), 1)
         print(f"Generated projections from 3D volume: {data['projections'].shape}")
+        
+        # Generate 2D SDF targets from projections for SDF loss
+        from src.render.sdf_utils import occupancy_to_sdf_2d
+        proj_sdf_one = occupancy_to_sdf_2d(train_projs_one.squeeze(0).squeeze(0), voxel_size=proj_reso[0])  # [512, 512]
+        proj_sdf_two = occupancy_to_sdf_2d(train_projs_two.squeeze(0).squeeze(0), voxel_size=proj_reso[1])  # [512, 512]
+        data["sdf_projections"] = torch.cat((proj_sdf_one[None, None, :], proj_sdf_two[None, None, :]), 1)  # [1, 2, 512, 512]
+        print(f"Generated 2D SDF targets: {data['sdf_projections'].shape}")
 
         # Dataset
         self.dataconfig = data
@@ -189,10 +195,6 @@ class Trainer:
                 print("Starting training from scratch.")
                 self.epoch_start = 0
 
-        # Summary writer
-        self.writer = SummaryWriter(self.expdir)
-        self.writer.add_text("parameters", self.args2string(cfg), global_step=0)
-        
         # Loss tracking for plotting
         self.training_losses = []
 
@@ -298,9 +300,28 @@ class Trainer:
                             print(f"Saved ground truth projection image {i+1}: {gt_proj_img_path}")
                         
                         # Generate and save predicted projections from final reconstruction
-                        image_pred_tensor = torch.tensor(image_pred, dtype=torch.float32, device=self.train_dset.projs.device)[None, ...]
-                        pred_projs_one = self.ct_projector_first.forward_project(image_pred_tensor)
-                        pred_projs_two = self.ct_projector_second.forward_project(image_pred_tensor)
+                        # Note: image_pred is now SDF values, need to handle differently
+                        sdf_pred_tensor = torch.tensor(image_pred, dtype=torch.float32, device=self.train_dset.projs.device)[None, ...]
+                        
+                        # Save 3D SDF prediction
+                        sdf_3d_filename = f"sdf_3d_{self.current_model_id}.npy"
+                        sdf_3d_path = osp.join(self.output_recon_dir, sdf_3d_filename)
+                        np.save(sdf_3d_path, image_pred)
+                        print(f"Saved 3D SDF prediction: {sdf_3d_path}")
+                        
+                        # Convert SDF to occupancy for projection
+                        from src.render.sdf_utils import sdf_to_occupancy, sdf_3d_to_occupancy_to_sdf_2d
+                        occupancy_pred = sdf_to_occupancy(sdf_pred_tensor, alpha=50.0)
+                        
+                        # Save 3D occupancy prediction (final output like before)
+                        occupancy_3d_filename = f"recon_occupancy_{self.current_model_id}.npy"
+                        occupancy_3d_path = osp.join(self.output_recon_dir, occupancy_3d_filename)
+                        occupancy_3d_data = occupancy_pred.squeeze().detach().cpu().numpy()
+                        np.save(occupancy_3d_path, occupancy_3d_data)
+                        print(f"Saved 3D occupancy prediction: {occupancy_3d_path}")
+                        
+                        pred_projs_one = self.ct_projector_first.forward_project(occupancy_pred)
+                        pred_projs_two = self.ct_projector_second.forward_project(occupancy_pred)
                         pred_projs = torch.cat((pred_projs_one, pred_projs_two), 1)
                         
                         pred_projs_filename = f"pred_projections_{self.current_model_id}.npy"
@@ -308,6 +329,55 @@ class Trainer:
                         pred_projs_data = pred_projs.detach().cpu().numpy()
                         np.save(pred_projs_path, pred_projs_data)
                         print(f"Saved predicted projections: {pred_projs_path}")
+                        
+                        # Generate and save 2D SDF predictions
+                        detector_pixel_size = self.dataconfig["dDetector"][0]  # Use first detector resolution  
+                        pred_sdf_2d, _ = sdf_3d_to_occupancy_to_sdf_2d(
+                            sdf_pred_tensor, self.ct_projector_first, self.ct_projector_second,
+                            alpha=50.0, voxel_size_2d=detector_pixel_size
+                        )
+                        
+                        pred_sdf_2d_filename = f"sdf_2d_pred_{self.current_model_id}.npy"
+                        pred_sdf_2d_path = osp.join(self.output_recon_dir, pred_sdf_2d_filename)
+                        pred_sdf_2d_data = pred_sdf_2d.detach().cpu().numpy()
+                        np.save(pred_sdf_2d_path, pred_sdf_2d_data)
+                        print(f"Saved 2D SDF predictions: {pred_sdf_2d_path}")
+                        
+                        # Save predicted 2D SDF as images
+                        for i in range(pred_sdf_2d_data.shape[1]):
+                            sdf_img = pred_sdf_2d_data[0, i]  # Get SDF view i
+                            # Use RdBu_r colormap for SDF (blue=negative/inside, red=positive/outside)
+                            pred_sdf_img_path = osp.join(self.output_recon_dir, f"sdf_2d_pred_{self.current_model_id}_view_{i+1}.png")
+                            plt.figure(figsize=(8, 8))
+                            plt.imshow(sdf_img, cmap='RdBu_r', vmin=-5, vmax=5)  # Fixed range for better visualization
+                            plt.colorbar(label='SDF Value (mm)')
+                            plt.title(f'Predicted 2D SDF - View {i+1}')
+                            plt.savefig(pred_sdf_img_path, dpi=150, bbox_inches='tight')
+                            plt.close()
+                            print(f"Saved predicted 2D SDF image {i+1}: {pred_sdf_img_path}")
+                        
+                        # Save ground truth 2D SDF targets 
+                        if "sdf_projections" in self.dataconfig:
+                            gt_sdf_2d_filename = f"sdf_2d_gt_{self.current_model_id}.npy"
+                            gt_sdf_2d_path = osp.join(self.output_recon_dir, gt_sdf_2d_filename)
+                            gt_sdf_2d_data = self.dataconfig["sdf_projections"].detach().cpu().numpy()
+                            np.save(gt_sdf_2d_path, gt_sdf_2d_data)
+                            print(f"Saved 2D SDF ground truth: {gt_sdf_2d_path}")
+                            
+                            # Save ground truth 2D SDF as images
+                            for i in range(gt_sdf_2d_data.shape[1]):
+                                sdf_img = gt_sdf_2d_data[0, i]  # Get SDF view i
+                                # Use RdBu_r colormap for SDF (blue=negative/inside, red=positive/outside)
+                                gt_sdf_img_path = osp.join(self.output_recon_dir, f"sdf_2d_gt_{self.current_model_id}_view_{i+1}.png")
+                                plt.figure(figsize=(8, 8))
+                                plt.imshow(sdf_img, cmap='RdBu_r', vmin=-5, vmax=5)  # Fixed range for better visualization
+                                plt.colorbar(label='SDF Value (mm)')
+                                plt.title(f'Ground Truth 2D SDF - View {i+1}')
+                                plt.savefig(gt_sdf_img_path, dpi=150, bbox_inches='tight')
+                                plt.close()
+                                print(f"Saved ground truth 2D SDF image {i+1}: {gt_sdf_img_path}")
+                        else:
+                            print("Warning: No 2D SDF ground truth found in dataconfig")
                         
                         # Save predicted projections as images
                         for i in range(pred_projs_data.shape[1]):
@@ -317,6 +387,40 @@ class Trainer:
                             pred_proj_img_path = osp.join(self.output_recon_dir, f"pred_projection_{self.current_model_id}_view_{i+1}.png")
                             plt.imsave(pred_proj_img_path, proj_img_norm, cmap='gray')
                             print(f"Saved predicted projection image {i+1}: {pred_proj_img_path}")
+                        
+                        # Create comparison images showing GT vs Predicted side by side
+                        comparison_path = osp.join(self.output_recon_dir, f"comparison_{self.current_model_id}.png")
+                        fig, axes = plt.subplots(2, 4, figsize=(16, 8))
+                        
+                        for i in range(2):  # Two views
+                            # Ground truth occupancy projection
+                            axes[i, 0].imshow(gt_projs_data[0, i], cmap='gray')
+                            axes[i, 0].set_title(f'GT Occupancy View {i+1}')
+                            axes[i, 0].axis('off')
+                            
+                            # Predicted occupancy projection
+                            axes[i, 1].imshow(pred_projs_data[0, i], cmap='gray')
+                            axes[i, 1].set_title(f'Pred Occupancy View {i+1}')
+                            axes[i, 1].axis('off')
+                            
+                            # Ground truth SDF (if available)
+                            if "sdf_projections" in self.dataconfig:
+                                im3 = axes[i, 2].imshow(gt_sdf_2d_data[0, i], cmap='RdBu_r', vmin=-5, vmax=5)
+                                axes[i, 2].set_title(f'GT SDF View {i+1}')
+                                axes[i, 2].axis('off')
+                            else:
+                                axes[i, 2].text(0.5, 0.5, 'No GT SDF', ha='center', va='center')
+                                axes[i, 2].axis('off')
+                            
+                            # Predicted SDF
+                            im4 = axes[i, 3].imshow(pred_sdf_2d_data[0, i], cmap='RdBu_r', vmin=-5, vmax=5)
+                            axes[i, 3].set_title(f'Pred SDF View {i+1}')
+                            axes[i, 3].axis('off')
+                        
+                        plt.tight_layout()
+                        plt.savefig(comparison_path, dpi=150, bbox_inches='tight')
+                        plt.close()
+                        print(f"Saved comparison image: {comparison_path}")
                         
                         # Also save network weights with custom name
                         network_filename = f"network_{self.current_model_id}.pth"
@@ -382,9 +486,6 @@ class Trainer:
                 # Clear cache after saving
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
-
-            # Log learning rate
-            self.writer.add_scalar("train/lr", self.optimizer.param_groups[0]["lr"], self.global_step)
 
         # Save loss plot after training completion
         self.save_loss_plot()
