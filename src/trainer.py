@@ -67,10 +67,14 @@ class Trainer:
 
         # Setup data paths from main config (CCTA.yaml) - much cleaner!
         input_data_dir = cfg["exp"].get("input_data_dir", "./data/GT_volumes/")
-        gt_volume_filename = f"{self.current_model_id}.npy"
+        
+        # Extract original model ID from experiment name (format: {model_id}_lr{lr}_loss{type})
+        original_model_id = str(self.current_model_id).split('_')[0]
+        gt_volume_filename = f"{original_model_id}.npy"
         gt_volume_path = osp.join(input_data_dir, gt_volume_filename)
         
-        print(f"Processing model {self.current_model_id}")
+        print(f"Processing experiment {self.current_model_id}")
+        print(f"Original model ID: {original_model_id}")
         print(f"GT volume path: {gt_volume_path}")
 
         # Check if ground truth volume exists
@@ -278,7 +282,8 @@ class Trainer:
                         gt_volume_filename = f"gt_volume_{self.current_model_id}.npy"
                         gt_volume_path = osp.join(self.output_recon_dir, gt_volume_filename)
                         input_data_dir = self.conf["exp"].get("input_data_dir", "./data/GT_volumes/")
-                        original_gt_path = osp.join(input_data_dir, f"{self.current_model_id}.npy")
+                        original_model_id = str(self.current_model_id).split('_')[0]
+                        original_gt_path = osp.join(input_data_dir, f"{original_model_id}.npy")
                         gt_volume = np.load(original_gt_path)
                         np.save(gt_volume_path, gt_volume)
                         print(f"Saved ground truth 3D model: {gt_volume_path}")

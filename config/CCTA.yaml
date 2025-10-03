@@ -28,7 +28,7 @@ render:
   netchunk: 699060
 train:
   epoch: 5000
-  lrate: 0.0001
+  lrate: [0.0001, 0.00001]  # List of learning rates to experiment with
   lrate_gamma: 0.1
   lrate_step: 5000
   resume: False
@@ -41,6 +41,8 @@ train:
   sdf_alpha: 50.0  # Sharpness parameter for SDF to occupancy conversion
   eikonal_weight: 0.1  # Weight for Eikonal regularization loss
   sdf_loss_weight: 1.0  # Weight for 2D SDF projection loss
+  # Loss experiment settings
+  loss_experiments: ["combined", "projection_only", "sdf_only"]  # List of loss combinations to try
 log:
   i_eval: 5000  # Only evaluate at final epoch
   i_save: 5000  # Only save checkpoint at final epoch

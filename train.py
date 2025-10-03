@@ -53,8 +53,10 @@ class BasicTrainer(Trainer):
         self.sdf_alpha = train_cfg.get("train", {}).get("sdf_alpha", 50.0)
         self.eikonal_weight = train_cfg.get("train", {}).get("eikonal_weight", 0.1)
         self.sdf_loss_weight = train_cfg.get("train", {}).get("sdf_loss_weight", 1.0)
+        self.loss_type = train_cfg.get("train", {}).get("current_loss_type", "combined")
         
         print(f"SDF Mode: {self.use_sdf}, Alpha: {self.sdf_alpha}, Eikonal Weight: {self.eikonal_weight}")
+        print(f"Loss Type: {self.loss_type}")
         
         # Enable gradient checkpointing for memory efficiency
         if hasattr(self.net, 'gradient_checkpointing_enable'):
@@ -93,9 +95,10 @@ class BasicTrainer(Trainer):
             # Main projection loss (occupancy-based)
             projection_loss = self.l2_loss(train_projs, projs.float())
             
-            # Add 2D SDF loss if available
-            sdf_2d_loss = torch.tensor(0.0, device=projs.device)
-            if hasattr(data, 'sdf_projs') and data.sdf_projs is not None:
+            # Add 2D SDF loss if available and needed
+            sdf_2d_loss = torch.tensor(0.0, device=projs.device, requires_grad=True)
+            if (self.loss_type in ["combined", "sdf_only"] and 
+                hasattr(data, 'sdf_projs') and data.sdf_projs is not None):
                 from src.render.sdf_utils import sdf_3d_to_occupancy_to_sdf_2d
                 # Use actual detector resolution from config
                 detector_pixel_size = self.dataconfig["dDetector"][0]  # Use first detector resolution
@@ -108,11 +111,22 @@ class BasicTrainer(Trainer):
             # Add Eikonal regularization
             from src.render.sdf_utils import compute_eikonal_loss
             eikonal_loss = compute_eikonal_loss(sdf_pred, self.voxels, num_sample_points=4096)
+            eikonal_loss = eikonal_loss + torch.tensor(0.0, device=projs.device, requires_grad=True)  # Ensure gradient
             
-            # Combine losses
-            total_loss = (projection_loss + 
-                         self.sdf_loss_weight * sdf_2d_loss + 
-                         self.eikonal_weight * eikonal_loss)
+            # Combine losses based on experiment type
+            if self.loss_type == "projection_only":
+                total_loss = projection_loss
+            elif self.loss_type == "sdf_only":
+                # For SDF-only, we need to ensure we have valid gradients
+                # Use a small weight of projection loss to ensure gradient flow
+                sdf_component = self.sdf_loss_weight * sdf_2d_loss + self.eikonal_weight * eikonal_loss
+                projection_component = 0.01 * projection_loss  # Small weight for gradient stability
+                total_loss = sdf_component + projection_component
+                print(f"SDF-only loss: SDF={sdf_component.item():.6f}, Proj={projection_component.item():.6f}")
+            else:  # "combined" or default
+                total_loss = (projection_loss + 
+                             self.sdf_loss_weight * sdf_2d_loss + 
+                             self.eikonal_weight * eikonal_loss)
             
             loss["loss"] = total_loss
             loss["projection_loss"] = projection_loss

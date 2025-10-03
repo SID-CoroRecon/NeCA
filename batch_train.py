@@ -31,6 +31,10 @@ def batch_process_models(config_path):
     successful_models = []
     failed_models = []
     
+    # Get experiment parameters
+    lrates = cfg["train"]["lrate"] if isinstance(cfg["train"]["lrate"], list) else [cfg["train"]["lrate"]]
+    loss_experiments = cfg["train"].get("loss_experiments", ["combined"])
+    
     for i, model_id in enumerate(model_numbers):
         print(f"\n{'='*60}")
         print(f"Processing Model {model_id} ({i+1}/{len(model_numbers)})")
@@ -45,33 +49,43 @@ def batch_process_models(config_path):
                 failed_models.append(model_id)
                 continue
             
-            # Update configuration for current model
-            cfg["exp"]["current_model_id"] = model_id
+            # Run experiments for each learning rate and loss combination
+            for exp_idx, (lr, loss_type) in enumerate([(lr, loss) for lr in lrates for loss in loss_experiments]):
+                experiment_name = f"{model_id}_lr{lr}_loss{loss_type}"
+                print(f"\n--- Experiment {exp_idx+1}: LR={lr}, Loss={loss_type} ---")
+                
+                # Update configuration for current experiment
+                cfg["exp"]["current_model_id"] = experiment_name
+                cfg["train"]["lrate"] = lr
+                cfg["train"]["current_loss_type"] = loss_type
+                
+                # Initialize device
+                device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+                
+                print(f"Starting training for experiment {experiment_name}...")
+                print(f"Input file: {input_file}")
+                print(f"Expected output: {os.path.join(output_recon_dir, f'recon_{experiment_name}.npy')}")
+                
+                # Create trainer and start training
+                trainer = BasicTrainer.__new__(BasicTrainer)
+                trainer.__init__(cfg, device)
+                
+                print("Initial memory stats:")
+                print_memory_stats()
+                
+                # Start training
+                trainer.start()
+                
+                print(f"✅ Successfully completed experiment {experiment_name}")
+                
+                # Clear memory between experiments
+                del trainer
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
             
-            # Initialize device
-            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-            
-            print(f"Starting training for model {model_id}...")
-            print(f"Input file: {input_file}")
-            print(f"Expected output: {os.path.join(output_recon_dir, f'recon_{model_id}.npy')}")
-            
-            # Create trainer and start training
-            trainer = BasicTrainer.__new__(BasicTrainer)
-            trainer.__init__(cfg, device)
-            
-            print("Initial memory stats:")
-            print_memory_stats()
-            
-            # Start training
-            trainer.start()
-            
-            print(f"✅ Successfully completed training for model {model_id}")
             successful_models.append(model_id)
             
-            # Clear memory between models
-            del trainer
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            # Memory is already cleared after each experiment
                 
         except Exception as e:
             print(f"❌ Error processing model {model_id}: {str(e)}")
