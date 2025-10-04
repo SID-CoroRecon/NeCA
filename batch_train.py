@@ -33,7 +33,7 @@ def batch_process_models(config_path):
     
     # Get experiment parameters
     lrates = cfg["train"]["lrate"] if isinstance(cfg["train"]["lrate"], list) else [cfg["train"]["lrate"]]
-    loss_experiments = cfg["train"].get("loss_experiments", ["combined"])
+    loss_weight_experiments = cfg["train"].get("loss_weight_experiments", [[1.0, 1.0, 0.1]])
     
     for i, model_id in enumerate(model_numbers):
         print(f"\n{'='*60}")
@@ -49,15 +49,16 @@ def batch_process_models(config_path):
                 failed_models.append(model_id)
                 continue
             
-            # Run experiments for each learning rate and loss combination
-            for exp_idx, (lr, loss_type) in enumerate([(lr, loss) for lr in lrates for loss in loss_experiments]):
-                experiment_name = f"{model_id}_lr{lr}_loss{loss_type}"
-                print(f"\n--- Experiment {exp_idx+1}: LR={lr}, Loss={loss_type} ---")
+            # Run experiments for each learning rate and loss weight combination
+            for exp_idx, (lr, loss_weights) in enumerate([(lr, weights) for lr in lrates for weights in loss_weight_experiments]):
+                proj_w, sdf_w, eik_w = loss_weights
+                experiment_name = f"{model_id}_lr{lr}_proj{proj_w}_sdf{sdf_w}_eik{eik_w}"
+                print(f"\n--- Experiment {exp_idx+1}: LR={lr}, Weights=[proj:{proj_w}, sdf:{sdf_w}, eik:{eik_w}] ---")
                 
                 # Update configuration for current experiment
                 cfg["exp"]["current_model_id"] = experiment_name
                 cfg["train"]["lrate"] = lr
-                cfg["train"]["current_loss_type"] = loss_type
+                cfg["train"]["current_loss_weights"] = loss_weights
                 
                 # Initialize device
                 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

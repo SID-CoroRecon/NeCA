@@ -342,13 +342,13 @@ def batch_evaluate_models(
     
     # Get experiment parameters for generating filenames
     lrates = cfg["train"]["lrate"] if isinstance(cfg["train"]["lrate"], list) else [cfg["train"]["lrate"]]
-    loss_experiments = cfg["train"].get("loss_experiments", ["combined"])
+    loss_weight_experiments = cfg["train"].get("loss_weight_experiments", [[1.0, 1.0, 0.1]])
     
     print(f"Input GT directory: {input_data_dir}")
     print(f"Reconstructions directory: {output_recon_dir}")
     print(f"Models to evaluate: {model_numbers}")
     print(f"Learning rates: {lrates}")
-    print(f"Loss experiments: {loss_experiments}")
+    print(f"Loss weight experiments: {loss_weight_experiments}")
     print(f"Evaluation parameters:")
     print(f"  Voxel spacing: {voxel_spacing} mm")
     print(f"  GT threshold: {threshold_label}")
@@ -372,9 +372,11 @@ def batch_evaluate_models(
         
         # Evaluate each experiment combination
         for lr in lrates:
-            for loss_type in loss_experiments:
-                experiment_name = f"{model_id}_lr{lr}_loss{loss_type}"
-                recon_path = os.path.join(output_recon_dir, f"recon_occupancy_{experiment_name}.npy")
+            for loss_weights in loss_weight_experiments:
+                proj_w, sdf_w, eik_w = loss_weights
+                experiment_name = f"{model_id}_lr{lr}_proj{proj_w}_sdf{sdf_w}_eik{eik_w}"
+                # Updated path structure: output_recon_dir/model_id/experiment_name/recon_occupancy_experiment_name.npy
+                recon_path = os.path.join(output_recon_dir, str(model_id), experiment_name, f"recon_occupancy_{experiment_name}.npy")
                 
                 print(f"  Experiment: {experiment_name}")
                 
@@ -392,7 +394,9 @@ def batch_evaluate_models(
                 # Add experiment metadata
                 result['base_model_id'] = model_id
                 result['learning_rate'] = lr
-                result['loss_type'] = loss_type
+                result['projection_weight'] = proj_w
+                result['sdf_weight'] = sdf_w
+                result['eikonal_weight'] = eik_w
                 result['experiment_name'] = experiment_name
                 
                 results.append(result)

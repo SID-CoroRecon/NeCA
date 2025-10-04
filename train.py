@@ -51,12 +51,17 @@ class BasicTrainer(Trainer):
         # SDF-related parameters
         self.use_sdf = train_cfg.get("train", {}).get("use_sdf", True)
         self.sdf_alpha = train_cfg.get("train", {}).get("sdf_alpha", 50.0)
-        self.eikonal_weight = train_cfg.get("train", {}).get("eikonal_weight", 0.1)
-        self.sdf_loss_weight = train_cfg.get("train", {}).get("sdf_loss_weight", 1.0)
-        self.loss_type = train_cfg.get("train", {}).get("current_loss_type", "combined")
         
-        print(f"SDF Mode: {self.use_sdf}, Alpha: {self.sdf_alpha}, Eikonal Weight: {self.eikonal_weight}")
-        print(f"Loss Type: {self.loss_type}")
+        # Loss weights from experiment configuration
+        self.loss_weights = train_cfg.get("train", {}).get("current_loss_weights", [1.0, 1.0, 0.1])
+        self.projection_weight, self.sdf_loss_weight, self.eikonal_weight = self.loss_weights
+        
+        print(f"SDF Mode: {self.use_sdf}, Alpha: {self.sdf_alpha}")
+        print(f"Loss Weights - Projection: {self.projection_weight}, SDF: {self.sdf_loss_weight}, Eikonal: {self.eikonal_weight}")
+        
+        # Best model tracking
+        self.best_loss = float('inf')
+        self.best_epoch = 0
         
         # Enable gradient checkpointing for memory efficiency
         if hasattr(self.net, 'gradient_checkpointing_enable'):
@@ -95,9 +100,9 @@ class BasicTrainer(Trainer):
             # Main projection loss (occupancy-based)
             projection_loss = self.l2_loss(train_projs, projs.float())
             
-            # Add 2D SDF loss if available and needed
+            # Add 2D SDF loss if available and weight > 0
             sdf_2d_loss = torch.tensor(0.0, device=projs.device, requires_grad=True)
-            if (self.loss_type in ["combined", "sdf_only"] and 
+            if (self.sdf_loss_weight > 0 and 
                 hasattr(data, 'sdf_projs') and data.sdf_projs is not None):
                 from src.render.sdf_utils import sdf_3d_to_occupancy_to_sdf_2d
                 # Use actual detector resolution from config
@@ -108,25 +113,16 @@ class BasicTrainer(Trainer):
                 )
                 sdf_2d_loss = self.l2_loss(pred_sdf_2d, data.sdf_projs.float())
             
-            # Add Eikonal regularization
-            from src.render.sdf_utils import compute_eikonal_loss
-            eikonal_loss = compute_eikonal_loss(sdf_pred, self.voxels, num_sample_points=4096)
-            eikonal_loss = eikonal_loss + torch.tensor(0.0, device=projs.device, requires_grad=True)  # Ensure gradient
+            # Add Eikonal regularization if weight > 0
+            eikonal_loss = torch.tensor(0.0, device=projs.device, requires_grad=True)
+            if self.eikonal_weight > 0:
+                from src.render.sdf_utils import compute_eikonal_loss
+                eikonal_loss = compute_eikonal_loss(sdf_pred, self.voxels, num_sample_points=4096)
             
-            # Combine losses based on experiment type
-            if self.loss_type == "projection_only":
-                total_loss = projection_loss
-            elif self.loss_type == "sdf_only":
-                # For SDF-only, we need to ensure we have valid gradients
-                # Use a small weight of projection loss to ensure gradient flow
-                sdf_component = self.sdf_loss_weight * sdf_2d_loss + self.eikonal_weight * eikonal_loss
-                projection_component = 0.01 * projection_loss  # Small weight for gradient stability
-                total_loss = sdf_component + projection_component
-                print(f"SDF-only loss: SDF={sdf_component.item():.6f}, Proj={projection_component.item():.6f}")
-            else:  # "combined" or default
-                total_loss = (projection_loss + 
-                             self.sdf_loss_weight * sdf_2d_loss + 
-                             self.eikonal_weight * eikonal_loss)
+            # Combine losses with weights
+            total_loss = (self.projection_weight * projection_loss + 
+                         self.sdf_loss_weight * sdf_2d_loss + 
+                         self.eikonal_weight * eikonal_loss)
             
             loss["loss"] = total_loss
             loss["projection_loss"] = projection_loss
