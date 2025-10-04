@@ -117,7 +117,7 @@ class BasicTrainer(Trainer):
             eikonal_loss = torch.tensor(0.0, device=projs.device, requires_grad=True)
             if self.eikonal_weight > 0:
                 from src.render.sdf_utils import compute_eikonal_loss
-                eikonal_loss = compute_eikonal_loss(sdf_pred, self.voxels, num_sample_points=4096)
+                eikonal_loss = compute_eikonal_loss(self.net, self.voxels, num_sample_points=32)
             
             # Combine losses with weights
             total_loss = (self.projection_weight * projection_loss + 
