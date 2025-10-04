@@ -340,9 +340,15 @@ def batch_evaluate_models(
     if model_numbers is None:
         model_numbers = cfg["exp"].get("model_numbers", [1])
     
+    # Get experiment parameters for generating filenames
+    lrates = cfg["train"]["lrate"] if isinstance(cfg["train"]["lrate"], list) else [cfg["train"]["lrate"]]
+    loss_experiments = cfg["train"].get("loss_experiments", ["combined"])
+    
     print(f"Input GT directory: {input_data_dir}")
     print(f"Reconstructions directory: {output_recon_dir}")
     print(f"Models to evaluate: {model_numbers}")
+    print(f"Learning rates: {lrates}")
+    print(f"Loss experiments: {loss_experiments}")
     print(f"Evaluation parameters:")
     print(f"  Voxel spacing: {voxel_spacing} mm")
     print(f"  GT threshold: {threshold_label}")
@@ -352,7 +358,7 @@ def batch_evaluate_models(
     # Create output directory
     os.makedirs(output_dir, exist_ok=True)
     
-    # Evaluate each model
+    # Evaluate each model and experiment combination
     results = []
     successful_evaluations = 0
     failed_evaluations = 0
@@ -361,27 +367,40 @@ def batch_evaluate_models(
         print(f"\n📊 Evaluating Model {model_id}")
         print("-" * 40)
         
-        # Define paths
+        # Define ground truth path (same for all experiments)
         gt_path = os.path.join(input_data_dir, f"{model_id}.npy")
-        recon_path = os.path.join(output_recon_dir, f"recon_{model_id}.npy")
         
-        # Evaluate single model
-        result = evaluate_single_model(
-            model_id=model_id,
-            gt_volume_path=gt_path,
-            recon_volume_path=recon_path,
-            voxel_spacing=voxel_spacing,
-            threshold_label=threshold_label,
-            threshold_output=threshold_output,
-            apply_rotation=apply_rotation
-        )
-        
-        results.append(result)
-        
-        if result['evaluation_success']:
-            successful_evaluations += 1
-        else:
-            failed_evaluations += 1
+        # Evaluate each experiment combination
+        for lr in lrates:
+            for loss_type in loss_experiments:
+                experiment_name = f"{model_id}_lr{lr}_loss{loss_type}"
+                recon_path = os.path.join(output_recon_dir, f"recon_occupancy_{experiment_name}.npy")
+                
+                print(f"  Experiment: {experiment_name}")
+                
+                # Evaluate single experiment
+                result = evaluate_single_model(
+                    model_id=experiment_name,  # Use experiment name as identifier
+                    gt_volume_path=gt_path,
+                    recon_volume_path=recon_path,
+                    voxel_spacing=voxel_spacing,
+                    threshold_label=threshold_label,
+                    threshold_output=threshold_output,
+                    apply_rotation=apply_rotation
+                )
+                
+                # Add experiment metadata
+                result['base_model_id'] = model_id
+                result['learning_rate'] = lr
+                result['loss_type'] = loss_type
+                result['experiment_name'] = experiment_name
+                
+                results.append(result)
+                
+                if result['evaluation_success']:
+                    successful_evaluations += 1
+                else:
+                    failed_evaluations += 1
     
     # Create DataFrame
     df_results = pd.DataFrame(results)
