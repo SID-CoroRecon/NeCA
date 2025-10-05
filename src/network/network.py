@@ -31,6 +31,9 @@ class DensityNetwork(nn.Module):
             self.activations.append(nn.Identity())  # No activation - pure regression
         else:
             raise NotImplementedError("Unknown last activation")
+        
+        # Apply SDF-tuned Xavier initialization
+        self._init_weights_for_sdf()
 
     def _forward_layers(self, x, input_pts, start_layer=0, end_layer=None):
         """
@@ -72,4 +75,29 @@ class DensityNetwork(nn.Module):
             x = self._forward_layers(x, input_pts, 0, len(self.layers))
         
         return x
+    
+    def _init_weights_for_sdf(self):
+        """
+        SDF-tuned Xavier initialization for better convergence.
+        """
+        for i, layer in enumerate(self.layers):
+            if isinstance(layer, nn.Linear):
+                # Xavier uniform initialization with SDF-specific scaling
+                if i == len(self.layers) - 1:  # Final layer
+                    # Final layer should output reasonable distance values initially
+                    # Scale down to encourage small initial SDF predictions
+                    nn.init.xavier_uniform_(layer.weight, gain=0.1)
+                    nn.init.constant_(layer.bias, 0.0)
+                else:
+                    # Hidden layers with standard Xavier but slightly smaller gain
+                    # This helps with gradient flow in deep SDF networks
+                    nn.init.xavier_uniform_(layer.weight, gain=0.8)
+                    nn.init.constant_(layer.bias, 0.0)
+
+
+def get_network(name):
+    if name == "mlp":
+        return DensityNetwork
+    else:
+        raise NotImplementedError(f"Network {name} not implemented")
     
