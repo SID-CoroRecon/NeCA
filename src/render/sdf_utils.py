@@ -91,8 +91,9 @@ def compute_eikonal_loss(network, coords, num_sample_points=64):
         # Use very small sample size to reduce memory usage
         sample_size = min(num_sample_points, coords.shape[0])
         
-        # Sample random points
-        indices = torch.randperm(coords.shape[0], device=coords.device)[:sample_size]
+        # Sample points deterministically (using fixed pattern instead of random)
+        step = max(1, coords.shape[0] // sample_size)
+        indices = torch.arange(0, coords.shape[0], step, device=coords.device)[:sample_size]
         coords_sample = coords[indices].contiguous().clone().detach().requires_grad_(True)
         
         # Single forward pass for all samples at once (no chunking)

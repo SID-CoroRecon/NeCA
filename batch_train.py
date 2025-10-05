@@ -7,6 +7,7 @@ import os
 import yaml
 import argparse
 import torch
+import numpy as np
 from src.config.configloading import load_config
 from train import BasicTrainer, print_memory_stats
 
@@ -60,8 +61,15 @@ def batch_process_models(config_path):
                 cfg["train"]["lrate"] = lr
                 cfg["train"]["current_loss_weights"] = loss_weights
                 
-                # Initialize device
+                # Initialize device and set seeds for reproducibility
                 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+                
+                # Set same seeds for all experiments (fair comparison)
+                torch.manual_seed(42)
+                np.random.seed(42)
+                if torch.cuda.is_available():
+                    torch.cuda.manual_seed(42)
+                    torch.cuda.manual_seed_all(42)
                 
                 print(f"Starting training for experiment {experiment_name}...")
                 print(f"Input file: {input_file}")

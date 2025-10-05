@@ -1,6 +1,7 @@
 import torch
 import argparse
 import os
+import numpy as np
 
 from src.config.configloading import load_config
 from src.render import run_network
@@ -19,8 +20,16 @@ cfg = load_config(args.config)
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# Enable memory efficient settings
-torch.backends.cudnn.benchmark = True
+# Set seeds for reproducibility
+torch.manual_seed(42)
+np.random.seed(42)
+if torch.cuda.is_available():
+    torch.cuda.manual_seed(42)
+    torch.cuda.manual_seed_all(42)
+
+# Enable deterministic behavior
+torch.backends.cudnn.deterministic = True
+torch.backends.cudnn.benchmark = False
 torch.backends.cudnn.enabled = True
 
 # Set environment variables for memory optimization
