@@ -52,9 +52,9 @@ def batch_process_models(config_path):
             
             # Run experiments for each learning rate and loss weight combination
             for exp_idx, (lr, loss_weights) in enumerate([(lr, weights) for lr in lrates for weights in loss_weight_experiments]):
-                proj_w, sdf_w, eik_w = loss_weights
-                experiment_name = f"{model_id}_lr{lr}_proj{proj_w}_sdf{sdf_w}_eik{eik_w}"
-                print(f"\n--- Experiment {exp_idx+1}: LR={lr}, Weights=[proj:{proj_w}, sdf:{sdf_w}, eik:{eik_w}] ---")
+                proj_w, sdf_w = loss_weights
+                experiment_name = f"{model_id}_lr{lr}_proj{proj_w}_sdf{sdf_w}"
+                print(f"\n--- Experiment {exp_idx+1}: LR={lr}, Weights=[proj:{proj_w}, sdf:{sdf_w}] ---")
                 
                 # Update configuration for current experiment
                 cfg["exp"]["current_model_id"] = experiment_name

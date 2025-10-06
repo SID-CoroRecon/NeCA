@@ -69,67 +69,6 @@ def occupancy_to_sdf_2d(occupancy_2d, voxel_size=1.0):
     return result
 
 
-def compute_eikonal_loss(network, coords, num_sample_points=64):
-    """
-    Ultra memory-efficient Eikonal regularization loss: ||∇SDF|| = 1
-    
-    The Eikonal equation states that the gradient magnitude of a proper SDF should be 1.
-    This loss encourages the network to learn proper distance fields.
-    
-    Args:
-        network: The neural network (SDF function)
-        coords: 3D coordinates where SDF will be evaluated [N, 3]
-        num_sample_points: Number of random points to sample for gradient computation
-        
-    Returns:
-        eikonal_loss: Mean squared error between gradient magnitude and 1
-    """
-    if coords.shape[0] == 0:
-        return torch.tensor(0.0, device=coords.device, requires_grad=True)
-    
-    try:
-        # Use very small sample size to reduce memory usage
-        sample_size = min(num_sample_points, coords.shape[0])
-        
-        # Sample points deterministically (using fixed pattern instead of random)
-        step = max(1, coords.shape[0] // sample_size)
-        indices = torch.arange(0, coords.shape[0], step, device=coords.device)[:sample_size]
-        coords_sample = coords[indices].contiguous().clone().detach().requires_grad_(True)
-        
-        # Single forward pass for all samples at once (no chunking)
-        with torch.amp.autocast('cuda', enabled=False):
-            sdf_sample = network(coords_sample)
-            
-            # Ensure proper shape
-            if sdf_sample.dim() > 2:
-                sdf_sample = sdf_sample.reshape(-1, 1)
-            elif sdf_sample.dim() == 1:
-                sdf_sample = sdf_sample.unsqueeze(-1)
-            
-            # Compute gradients
-            gradients = torch.autograd.grad(
-                outputs=sdf_sample,
-                inputs=coords_sample,
-                grad_outputs=torch.ones_like(sdf_sample),
-                create_graph=True,
-                retain_graph=True,
-                only_inputs=True
-            )[0]
-            
-            # Compute gradient magnitude
-            gradient_magnitude = torch.norm(gradients, dim=-1, keepdim=True)
-            
-            # Eikonal loss
-            eikonal_loss = torch.mean((gradient_magnitude - 1.0) ** 2)
-            
-            return eikonal_loss
-            
-    except Exception as e:
-        # If computation fails, return zero loss
-        print(f"Warning: Eikonal loss computation failed: {e}")
-        return torch.tensor(0.0, device=coords.device, requires_grad=True)
-
-
 def sdf_3d_to_occupancy_to_sdf_2d(sdf_3d, projector_first, projector_second, 
                                   alpha=50.0, voxel_size_2d=0.278):
     """

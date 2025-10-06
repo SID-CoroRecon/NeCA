@@ -373,8 +373,8 @@ def batch_evaluate_models(
         # Evaluate each experiment combination
         for lr in lrates:
             for loss_weights in loss_weight_experiments:
-                proj_w, sdf_w, eik_w = loss_weights
-                experiment_name = f"{model_id}_lr{lr}_proj{proj_w}_sdf{sdf_w}_eik{eik_w}"
+                proj_w, sdf_w = loss_weights
+                experiment_name = f"{model_id}_lr{lr}_proj{proj_w}_sdf{sdf_w}"
                 # Updated path structure: output_recon_dir/model_id/experiment_name/recon_occupancy_experiment_name.npy
                 recon_path = os.path.join(output_recon_dir, str(model_id), experiment_name, f"recon_occupancy_{experiment_name}.npy")
                 
@@ -396,7 +396,6 @@ def batch_evaluate_models(
                 result['learning_rate'] = lr
                 result['projection_weight'] = proj_w
                 result['sdf_weight'] = sdf_w
-                result['eikonal_weight'] = eik_w
                 result['experiment_name'] = experiment_name
                 
                 results.append(result)

@@ -39,8 +39,8 @@ train:
   # SDF-related parameters
   use_sdf: true  # Use SDF representation instead of occupancy
   sdf_alpha: 50.0  # Sharpness parameter for SDF to occupancy conversion
-  # Loss weight experiments - [projection_weight, sdf_2d_weight, eikonal_weight]
-  loss_weight_experiments: [[1.0, 0.0, 0.0], [1.0, 1.0, 0.1]]  # Different weight combinations to try
+  # Loss weight experiments - [projection_weight, sdf_2d_weight]
+  loss_weight_experiments: [[0.5, 1.0]]
 log:
   i_eval: 5000  # Only evaluate at final epoch
   i_save: 5000  # Only save checkpoint at final epoch

@@ -62,11 +62,11 @@ class BasicTrainer(Trainer):
         self.sdf_alpha = train_cfg.get("train", {}).get("sdf_alpha", 50.0)
         
         # Loss weights from experiment configuration
-        self.loss_weights = train_cfg.get("train", {}).get("current_loss_weights", [1.0, 1.0, 0.1])
-        self.projection_weight, self.sdf_loss_weight, self.eikonal_weight = self.loss_weights
+        self.loss_weights = train_cfg.get("train", {}).get("current_loss_weights", [1.0, 1.0])
+        self.projection_weight, self.sdf_loss_weight = self.loss_weights
         
         print(f"SDF Mode: {self.use_sdf}, Alpha: {self.sdf_alpha}")
-        print(f"Loss Weights - Projection: {self.projection_weight}, SDF: {self.sdf_loss_weight}, Eikonal: {self.eikonal_weight}")
+        print(f"Loss Weights - Projection: {self.projection_weight}, SDF: {self.sdf_loss_weight}")
         
         # Best model tracking
         self.best_loss = float('inf')
@@ -122,21 +122,13 @@ class BasicTrainer(Trainer):
                 )
                 sdf_2d_loss = self.l2_loss(pred_sdf_2d, data.sdf_projs.float())
             
-            # Add Eikonal regularization if weight > 0
-            eikonal_loss = torch.tensor(0.0, device=projs.device, requires_grad=True)
-            if self.eikonal_weight > 0:
-                from src.render.sdf_utils import compute_eikonal_loss
-                eikonal_loss = compute_eikonal_loss(self.net, self.voxels, num_sample_points=32)
-            
             # Combine losses with weights
             total_loss = (self.projection_weight * projection_loss + 
-                         self.sdf_loss_weight * sdf_2d_loss + 
-                         self.eikonal_weight * eikonal_loss)
+                         self.sdf_loss_weight * sdf_2d_loss)
             
             loss["loss"] = total_loss
             loss["projection_loss"] = projection_loss
             loss["sdf_2d_loss"] = sdf_2d_loss
-            loss["eikonal_loss"] = eikonal_loss
 
         return loss
 
