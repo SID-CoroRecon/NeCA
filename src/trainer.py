@@ -549,7 +549,7 @@ class Trainer:
             
             # Ground truth SDF (if available)
             if gt_sdf_2d_data is not None:
-                axes[i, 2].imshow(gt_sdf_2d_data[0, i], cmap='RdBu_r', vmin=-5, vmax=5)
+                axes[i, 2].imshow(gt_sdf_2d_data[0, i], cmap='RdBu_r')
                 axes[i, 2].set_title(f'GT SDF View {i+1}')
                 axes[i, 2].axis('off')
             else:
@@ -557,7 +557,7 @@ class Trainer:
                 axes[i, 2].axis('off')
             
             # Predicted SDF
-            axes[i, 3].imshow(pred_sdf_2d_data[0, i], cmap='RdBu_r', vmin=-5, vmax=5)
+            axes[i, 3].imshow(pred_sdf_2d_data[0, i], cmap='RdBu_r')
             axes[i, 3].set_title(f'Pred SDF View {i+1}')
             axes[i, 3].axis('off')
         
