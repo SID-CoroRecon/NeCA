@@ -1,17 +1,30 @@
 #!/usr/bin/env python3
 import os
 import sys
+import yaml
+import math
 import torch
 import numpy as np
-from scipy import ndimage
 import matplotlib.pyplot as plt
 
 # Add src to path
 sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
 
+from src.config.configloading import load_config
+from src.render.ct_geometry_projector import ConeBeam3DProjector
 from src.render.sdf_utils import sdf_to_occupancy, occupancy_to_sdf_2d 
+from odl.tomo.util.utility import axis_rotation, rotation_matrix_from_to
 
-alpha = 100.0  # Sharpness parameter for SDF to occupancy conversion
+alpha = 50.0  # Use same alpha as training (from train.py)
+
+
+def rotation_matrix_to_axis_angle(m):
+    angle = np.arccos((m[0,0] + m[1,1] + m[2,2] - 1)/2)
+    x = (m[2,1] - m[1,2])/math.sqrt((m[2,1]-m[1,2])**2 + (m[0,2] - m[2,0])**2 + (m[1,0] -m[0,1])**2)
+    y = (m[0,2] - m[2,0])/math.sqrt((m[2,1]-m[1,2])**2 + (m[0,2]-m[2,0])**2 + (m[1,0]-m[0,1])**2)
+    z = (m[1,0] - m[0,1])/math.sqrt((m[2,1]-m[1,2])**2 + (m[0,2]-m[2,0])**2 + (m[1,0]-m[0,1])**2)
+    return (x,y,z), angle
+
 
 def load_real_artery(artery_path):
     """Load a real 3D artery from dataset."""
@@ -32,159 +45,157 @@ def load_real_artery(artery_path):
     return artery_3d
 
 
-def occupancy_to_sdf_3d(occupancy_3d, voxel_size=1.0):
-    """Convert 3D occupancy to 3D SDF using distance transform."""
-    
-    print("Converting 3D occupancy to 3D SDF...")
-    
-    # Threshold to create binary mask
-    binary_mask = occupancy_3d > 0.5
-    
-    # Distance transform for inside (negative distances)
-    inside_dist = ndimage.distance_transform_edt(binary_mask) * voxel_size
-    
-    # Distance transform for outside (positive distances)  
-    outside_dist = ndimage.distance_transform_edt(~binary_mask) * voxel_size
-    
-    # Combine: negative inside, positive outside
-    sdf_3d = np.where(binary_mask, -inside_dist, outside_dist)
-    
-    print(f"3D SDF range: [{sdf_3d.min():.3f}, {sdf_3d.max():.3f}]")
-    
-    return sdf_3d.astype(np.float32)
-
-
-def test_sdf_to_occupancy_conversion(artery_3d=None):
-    """Test SDF to occupancy conversion."""
-    print("Testing SDF to occupancy conversion...")
-    
-    # Use real artery data - convert occupancy to SDF first
-    print("Using real artery data...")
-    sdf_3d = occupancy_to_sdf_3d(artery_3d, voxel_size=0.8)  # Use actual voxel size from config
-    sdf_tensor = torch.tensor(sdf_3d, dtype=torch.float32)
-    
-    # Convert to occupancy
-    occupancy = sdf_to_occupancy(sdf_tensor, alpha=alpha)
-    
-    # Check properties
-    print(f"SDF range: [{sdf_tensor.min():.3f}, {sdf_tensor.max():.3f}]")
-    print(f"Occupancy range: [{occupancy.min():.3f}, {occupancy.max():.3f}]")
-    
-    # Verify that negative SDF -> high occupancy, positive SDF -> low occupancy
-    inside_mask = sdf_tensor < 0
-    outside_mask = sdf_tensor > 0
-    
-    avg_inside_occupancy = occupancy[inside_mask].mean()
-    avg_outside_occupancy = occupancy[outside_mask].mean()
-    
-    print(f"Average occupancy inside (SDF < 0): {avg_inside_occupancy:.3f}")
-    print(f"Average occupancy outside (SDF > 0): {avg_outside_occupancy:.3f}")
-    
-    assert avg_inside_occupancy > avg_outside_occupancy, "Inside should have higher occupancy than outside"
-    assert occupancy.min() >= 0 and occupancy.max() <= 1, "Occupancy should be in [0,1]"
-    
-    print("✓ SDF to occupancy conversion test passed!\n")
-    return sdf_tensor, occupancy
-
-
-def save_test_results(occupancy_3d):
-    """Save test results for visual inspection - focus on 2D projections."""
-    print("Saving test results...")
+def save_training_pipeline_results(proj_one, proj_two, sdf_one, sdf_two):
+    """Save results from the exact training pipeline."""
+    print("Saving training pipeline results...")
     
     output_dir = "./test_sdf_results/"
     os.makedirs(output_dir, exist_ok=True)
     
-    # Generate 2D projections from the 3D model for comparison
-    print("Generating 2D projections from 3D model...")
+    # Convert to numpy for visualization
+    proj_one_np = proj_one.squeeze().cpu().numpy()
+    proj_two_np = proj_two.squeeze().cpu().numpy()
+    sdf_one_np = sdf_one.cpu().numpy()
+    sdf_two_np = sdf_two.cpu().numpy()
     
-    # Create a simple orthogonal projection (max along z-axis to preserve vessel structure)
-    if occupancy_3d.dim() == 3:
-        # Use max projection instead of sum to preserve vessel structure
-        proj_2d_occupancy = torch.max(occupancy_3d, dim=0)[0].cpu().numpy()
-        # Apply a lower threshold to capture more vessel parts
-        proj_2d_occupancy = np.where(proj_2d_occupancy > 0.1, proj_2d_occupancy, 0.0)
-        # Normalize to [0,1] range
-        proj_2d_occupancy = proj_2d_occupancy / proj_2d_occupancy.max() if proj_2d_occupancy.max() > 0 else proj_2d_occupancy
-        
-        # Convert to tensor and generate 2D SDF
-        proj_2d_occupancy_tensor = torch.tensor(proj_2d_occupancy, dtype=torch.float32)
-        proj_2d_sdf = occupancy_to_sdf_2d(proj_2d_occupancy_tensor, voxel_size=0.28)
-        
-        print(f"2D Projection occupancy range: [{proj_2d_occupancy.min():.3f}, {proj_2d_occupancy.max():.3f}]")
-        print(f"2D Projection SDF range: [{proj_2d_sdf.min():.3f}, {proj_2d_sdf.max():.3f}]")
-        
-        # Create comparison figure
-        plt.figure(figsize=(15, 10))
-        
-        plt.subplot(2, 2, 1)
-        plt.imshow(proj_2d_occupancy, cmap='gray')
-        plt.title('2D Occupancy Projection\n(from 3D model)')
-        plt.colorbar()
-        
-        plt.subplot(2, 2, 3)
-        plt.imshow(proj_2d_sdf.cpu().numpy(), cmap='RdBu_r')
-        plt.title('2D SDF from Projection\n(from 3D model)')
-        plt.colorbar()
-        
-        # Create overlay: occupancy in gray, SDF contours in red/blue
-        plt.subplot(2, 2, 2)
-        plt.imshow(proj_2d_occupancy, cmap='gray', alpha=0.7)
-        plt.contour(proj_2d_sdf.cpu().numpy(), levels=[0], colors='red', linewidths=2)
-        plt.contour(proj_2d_sdf.cpu().numpy(), levels=[-3, -2, -1], colors='blue', alpha=0.5)
-        plt.contour(proj_2d_sdf.cpu().numpy(), levels=[1, 2, 3], colors='red', alpha=0.5)
-        plt.title('Occupancy + SDF Contours\n(0-level in red)')
-        
-        plt.subplot(2, 2, 4)
-        # Show difference between actual occupancy and SDF-derived occupancy
-        sdf_to_occ_back = sdf_to_occupancy(proj_2d_sdf, alpha=alpha)
-        diff = np.abs(proj_2d_occupancy - sdf_to_occ_back.cpu().numpy())
-        plt.imshow(diff, cmap='hot')
-        plt.title('Reconstruction Error\n|Orig - SDF→Occ|')
-        plt.colorbar()
-        
-        plt.tight_layout()
-        plt.savefig(os.path.join(output_dir, '2d_projection_comparison.png'), dpi=150, bbox_inches='tight')
-        plt.close()
-        
-        print(f"Saved 2D projection arrays to {output_dir}")
-        
-        # Print validation metrics
-        print("\n=== 2D Projection Validation ===")
-        inside_points = proj_2d_sdf < 0
-        outside_points = proj_2d_sdf > 0
-        avg_occ_inside = proj_2d_occupancy[inside_points.cpu().numpy()].mean() if inside_points.sum() > 0 else 0
-        avg_occ_outside = proj_2d_occupancy[outside_points.cpu().numpy()].mean() if outside_points.sum() > 0 else 0
-        print(f"Average occupancy inside vessels (SDF < 0): {avg_occ_inside:.3f}")
-        print(f"Average occupancy outside vessels (SDF > 0): {avg_occ_outside:.3f}")
-        print(f"Ratio (should be > 1): {avg_occ_inside / avg_occ_outside if avg_occ_outside > 0 else 'inf'}")
+    # Create comparison figure showing TRAINING pipeline results
+    plt.figure(figsize=(16, 8))
+    
+    # View 1: Occupancy projection
+    plt.subplot(2, 4, 1)
+    plt.imshow(proj_one_np, cmap='gray')
+    plt.title('ODL Projection View 1\n(Training Pipeline)')
+    plt.colorbar()
+    
+    # View 1: SDF (this is what training actually uses!)
+    plt.subplot(2, 4, 2)
+    plt.imshow(sdf_one_np, cmap='RdBu_r')
+    plt.title('2D SDF View 1\n(Training Ground Truth)')
+    plt.colorbar()
+    
+    # View 1: 2D occupancy from SDF
+    plt.subplot(2, 4, 3)
+    sdf_to_occ_1 = sdf_to_occupancy(sdf_one, alpha=alpha)
+    plt.imshow(sdf_to_occ_1.cpu().numpy(), cmap='gray')
+    plt.title('2D Occupancy from SDF View 1\n(SDF→Occupancy)')
+    plt.colorbar()
+    
+    # View 1: Back-conversion test
+    plt.subplot(2, 4, 4)
+    sdf_to_occ_back = sdf_to_occupancy(sdf_one, alpha=alpha)
+    proj_one_normalized = (proj_one_np - proj_one_np.min()) / (proj_one_np.max() - proj_one_np.min())
+    diff = np.abs(proj_one_normalized - sdf_to_occ_back.cpu().numpy())
+    plt.imshow(diff, cmap='hot')
+    plt.title('Reconstruction Error View 1\n|Proj - SDF→Occ|')
+    plt.colorbar()
+    
+    # View 2: Occupancy projection
+    plt.subplot(2, 4, 5)
+    plt.imshow(proj_two_np, cmap='gray')
+    plt.title('ODL Projection View 2\n(Training Pipeline)')
+    plt.colorbar()
+    
+    # View 2: SDF (this is what training actually uses!)
+    plt.subplot(2, 4, 6)
+    plt.imshow(sdf_two_np, cmap='RdBu_r')
+    plt.title('2D SDF View 2\n(Training Ground Truth)')
+    plt.colorbar()
+    
+    # View 2: 2D occupancy from SDF
+    plt.subplot(2, 4, 7)
+    sdf_to_occ_2 = sdf_to_occupancy(sdf_two, alpha=alpha)
+    plt.imshow(sdf_to_occ_2.cpu().numpy(), cmap='gray')
+    plt.title('2D Occupancy from SDF View 2\n(SDF→Occupancy)')
+    plt.colorbar()
+    
+    # View 2: Back-conversion test
+    plt.subplot(2, 4, 8)
+    sdf_to_occ_back_2 = sdf_to_occupancy(sdf_two, alpha=alpha)
+    proj_two_normalized = (proj_two_np - proj_two_np.min()) / (proj_two_np.max() - proj_two_np.min())
+    diff_2 = np.abs(proj_two_normalized - sdf_to_occ_back_2.cpu().numpy())
+    plt.imshow(diff_2, cmap='hot')
+    plt.title('Reconstruction Error View 2\n|Proj - SDF→Occ|')
+    plt.colorbar()
+    
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, 'training_pipeline_results.png'), dpi=150, bbox_inches='tight')
+    plt.close()
     
     print(f"Results saved to {output_dir}")
 
 
 def main(artery_path=None):
-    """Run all tests.
-    
-    Args:
-        artery_path (str): Path to real 3D artery numpy file. If None, uses synthetic data.
-    """
+    """Simulate exact training pipeline: 3D occupancy → ODL projector → 2D SDF"""
     print("=" * 60)
-    print("SDF Conversion Functions Test Suite")
+    print("Training Pipeline Simulation Test")
     print("=" * 60)
     
-    # Load real artery data if path provided
-    artery_3d = load_real_artery(artery_path)
-    print(f"Successfully loaded real artery data!")    
-    print("\n" + "=" * 60)
+    # Load config and setup projectors exactly like training
+    cfg = load_config("./config/CCTA.yaml")
+    configPath = cfg['exp']['dataconfig']
+    with open(configPath, "r") as handle:
+        data = yaml.safe_load(handle)
     
-    # Test 1: SDF to occupancy conversion
-    _, occupancy_3d = test_sdf_to_occupancy_conversion(artery_3d)
+    # Setup projector parameters (exact copy from trainer.py)
+    dso = data["DSO"]
+    dde = data["DDE"]
+    proj_size = np.array(data["nDetector"])
+    proj_reso = np.array(data["dDetector"])
+    image_size = np.array(data["nVoxel"])
+    image_reso = np.array(data["dVoxel"])
+    first_proj_angle = [-data["first_projection_angle"][1], data["first_projection_angle"][0]]
+    second_proj_angle = [-data["second_projection_angle"][1], data["second_projection_angle"][0]]
     
-    # Save results for visual inspection
-    save_test_results(occupancy_3d)
+    # Create first projector (exact copy from trainer.py)
+    from_source_vec= (0,-dso[0],0)
+    from_rot_vec = (-1,0,0)
+    to_source_vec = axis_rotation((0,0,1), angle=first_proj_angle[0]/180*np.pi, vectors=from_source_vec)
+    to_rot_vec = axis_rotation((0,0,1), angle=first_proj_angle[0]/180*np.pi, vectors=from_rot_vec)
+    to_source_vec = axis_rotation(to_rot_vec[0], angle=first_proj_angle[1]/180*np.pi, vectors=to_source_vec[0])
+    rot_mat = rotation_matrix_from_to(from_source_vec, to_source_vec[0])
+    proj_axis, proj_angle = rotation_matrix_to_axis_angle(rot_mat)
+    ct_projector_first = ConeBeam3DProjector(image_size, image_reso, proj_angle, proj_axis, proj_size, proj_reso, dde[0], dso[0])
+    
+    # Create second projector (exact copy from trainer.py)
+    from_source_vec= (0,-dso[1],0)
+    from_rot_vec = (-1,0,0)
+    to_source_vec = axis_rotation((0,0,1), angle=second_proj_angle[0]/180*np.pi, vectors=from_source_vec)
+    to_rot_vec = axis_rotation((0,0,1), angle=second_proj_angle[0]/180*np.pi, vectors=from_rot_vec)
+    to_source_vec = axis_rotation(to_rot_vec[0], angle=second_proj_angle[1]/180*np.pi, vectors=to_source_vec[0])
+    rot_mat = rotation_matrix_from_to(from_source_vec, to_source_vec[0])
+    proj_axis, proj_angle = rotation_matrix_to_axis_angle(rot_mat)
+    ct_projector_second = ConeBeam3DProjector(image_size, image_reso, proj_angle, proj_axis, proj_size, proj_reso, dde[1], dso[1])
+    
+    # Load and preprocess 3D artery exactly like training
+    phantom = np.load(artery_path)
+    phantom = np.transpose(phantom, (1,2,0))[::,::-1,::-1]
+    phantom = np.transpose(phantom, (2,1,0))[::-1,::,::].copy()
+    phantom_tensor = torch.tensor(phantom, dtype=torch.float32)[None, ...]
+    
+    print("Running EXACT training pipeline...")
+    print("Step 1: 3D occupancy → ODL projections")
+    
+    # Generate projections exactly like training
+    train_projs_one = ct_projector_first.forward_project(phantom_tensor)
+    train_projs_two = ct_projector_second.forward_project(phantom_tensor)
+    
+    print("Step 2: 2D projections → 2D SDF (distance transform)")
+    
+    # Convert to 2D SDF exactly like training  
+    proj_sdf_one = occupancy_to_sdf_2d(train_projs_one.squeeze(0).squeeze(0), voxel_size=proj_reso[0])
+    proj_sdf_two = occupancy_to_sdf_2d(train_projs_two.squeeze(0).squeeze(0), voxel_size=proj_reso[1])
+    
+    print(f"2D Projection 1 range: [{train_projs_one.min():.3f}, {train_projs_one.max():.3f}]")
+    print(f"2D Projection 2 range: [{train_projs_two.min():.3f}, {train_projs_two.max():.3f}]")
+    print(f"2D SDF 1 range: [{proj_sdf_one.min():.3f}, {proj_sdf_one.max():.3f}]")
+    print(f"2D SDF 2 range: [{proj_sdf_two.min():.3f}, {proj_sdf_two.max():.3f}]")
+    
+    # Save results showing the TRAINING pipeline results
+    save_training_pipeline_results(train_projs_one, train_projs_two, proj_sdf_one, proj_sdf_two)
     
     print("=" * 60)
-    print("All tests completed successfully! ✓")
-    print("Check ./test_sdf_results/ for visual results.")
+    print("Training pipeline simulation completed! ✓")
+    print("Check ./test_sdf_results/ for results.")
     print("=" * 60)
 
 
