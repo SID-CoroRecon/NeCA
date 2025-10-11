@@ -1,11 +1,11 @@
+import os
 import torch
 import argparse
-import os
 import numpy as np
 
-from src.config.configloading import load_config
-from src.render import run_network
 from src.trainer import Trainer
+from src.render import run_network
+from src.config.configloading import load_config
 
 def config_parser():
     parser = argparse.ArgumentParser()
@@ -52,8 +52,6 @@ class BasicTrainer(Trainer):
         train_device = device_override if device_override is not None else device
         
         super().__init__(train_cfg, train_device)
-        print(f"[Start] exp: {train_cfg['exp']['expname']}, net: Basic network")
-        print(f"Model ID: {train_cfg['exp'].get('current_model_id', 'default')}")
 
         self.l2_loss = torch.nn.MSELoss(reduction='mean')
         
@@ -61,8 +59,14 @@ class BasicTrainer(Trainer):
         self.use_sdf = train_cfg.get("train", {}).get("use_sdf", True)
         self.sdf_alpha = train_cfg.get("train", {}).get("sdf_alpha", 50.0)
         
-        # Loss weights from experiment configuration
-        self.loss_weights = train_cfg.get("train", {}).get("current_loss_weights", [1.0, 1.0])
+        # Set loss weights based on use_sdf
+        if self.use_sdf:
+            # Use weights from config for SDF mode
+            self.loss_weights = train_cfg.get("train", {}).get("current_loss_weights", [1.0, 1.0])
+        else:
+            # Force projection weight to 1.0 for occupancy mode, disable SDF loss
+            self.loss_weights = [1.0, 0.0]
+            
         self.projection_weight, self.sdf_loss_weight = self.loss_weights
         
         print(f"SDF Mode: {self.use_sdf}, Alpha: {self.sdf_alpha}")
@@ -79,20 +83,26 @@ class BasicTrainer(Trainer):
         print("Initial memory stats:")
         print_memory_stats()
 
-    def compute_loss(self, data, global_step, idx_epoch):
+    def compute_loss(self, data):
         loss = {"loss": 0.}
 
         projs = data.projs
         
         # Use autocast for mixed precision to save memory
         with torch.amp.autocast(enabled=self.use_mixed_precision, dtype=torch.float16, device_type='cuda'):
-            # Process network in chunks to save memory - now outputs SDF
-            sdf_pred = run_network(self.voxels, self.net, self.netchunk)
-            train_output_sdf = sdf_pred.squeeze()[None, ...]
+            # Process network in chunks to save memory
+            net_pred = run_network(self.voxels, self.net, self.netchunk)
+            train_output = net_pred.squeeze()[None, ...]
 
-            # Convert SDF to occupancy for projection
-            from src.render.sdf_utils import sdf_to_occupancy
-            train_output_occupancy = sdf_to_occupancy(train_output_sdf, alpha=self.sdf_alpha)
+            if self.use_sdf:
+                # SDF mode: network generates SDF, convert to occupancy for projections
+                from src.render.sdf_utils import sdf_to_occupancy
+                train_output_sdf = train_output
+                train_output_occupancy = sdf_to_occupancy(train_output_sdf, alpha=self.sdf_alpha)
+            else:
+                # Occupancy mode: network generates occupancy directly
+                train_output_occupancy = train_output
+                train_output_sdf = None
 
             # Process projections sequentially to reduce peak memory usage
             train_projs_one = self.ct_projector_first.forward_project(train_output_occupancy)
@@ -109,9 +119,9 @@ class BasicTrainer(Trainer):
             # Main projection loss (occupancy-based)
             projection_loss = self.l2_loss(train_projs, projs.float())
             
-            # Add 2D SDF loss if available and weight > 0
+            # Add 2D SDF loss only in SDF mode
             sdf_2d_loss = torch.tensor(0.0, device=projs.device, requires_grad=True)
-            if (self.sdf_loss_weight > 0 and 
+            if (self.use_sdf and self.sdf_loss_weight > 0 and 
                 hasattr(data, 'sdf_projs') and data.sdf_projs is not None):
                 from src.render.sdf_utils import sdf_3d_to_occupancy_to_sdf_2d
                 # Use actual detector resolution from config

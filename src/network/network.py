@@ -3,7 +3,7 @@ import torch.nn as nn
 from torch.utils.checkpoint import checkpoint
 
 class DensityNetwork(nn.Module):
-    def __init__(self, encoder, bound=0.2, num_layers=8, hidden_dim=256, skips=[4], out_dim=1, last_activation="sigmoid", use_gradient_checkpointing=True):
+    def __init__(self, encoder, bound=0.2, num_layers=8, hidden_dim=256, skips=[4], out_dim=1, use_sdf=False, use_gradient_checkpointing=True):
         super().__init__()
         self.nunm_layers = num_layers
         self.hidden_dim = hidden_dim
@@ -21,19 +21,11 @@ class DensityNetwork(nn.Module):
 
         # Activations
         self.activations = nn.ModuleList([nn.LeakyReLU(inplace=True) for i in range(0, num_layers-1, 1)])  # Use inplace for memory
-        if last_activation == "sigmoid":
-            self.activations.append(nn.Sigmoid())
-        elif last_activation == "tanh":
-            self.activations.append(nn.Tanh())
-        elif last_activation == "relu":
-            self.activations.append(nn.LeakyReLU(inplace=True))
-        elif last_activation == "linear" or last_activation == "none":
-            self.activations.append(nn.Identity())  # No activation - pure regression
-        else:
-            raise NotImplementedError("Unknown last activation")
-        
-        # Apply SDF-tuned Xavier initialization
-        self._init_weights_for_sdf()
+        self.activations.append(nn.Linear if use_sdf else nn.Sigmoid())
+
+        # Apply SDF-tuned Xavier initialization if we are on SDF mode
+        if use_sdf:
+            self._init_weights_for_sdf()
 
     def _forward_layers(self, x, input_pts, start_layer=0, end_layer=None):
         """

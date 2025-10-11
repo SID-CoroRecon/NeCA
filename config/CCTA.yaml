@@ -1,6 +1,4 @@
 exp:
-  expname: CCTA
-  expdir: ./logs/
   dataconfig: /kaggle/working/NeCA/config/config.yml
   # Batch processing configuration
   input_data_dir: /kaggle/input/deepca-preprocessed-dataset/data/split_two  # Directory containing ground truth volumes (1.npy, 2.npy, etc.)
@@ -13,7 +11,6 @@ network:
   hidden_dim: 256
   skips: [4]
   out_dim: 1
-  last_activation: linear
   bound: 0.3
   use_gradient_checkpointing: true  # Enable gradient checkpointing for memory efficiency
 encoder:
@@ -24,16 +21,11 @@ encoder:
   base_resolution: 16
   log2_hashmap_size: 19
 render:
-  n_fine: 0
   netchunk: 699060
 train:
   epoch: 5000
   lrate: [0.0001]  # List of learning rates to experiment with
-  lrate_gamma: 0.1
-  lrate_step: 5000
-  resume: False
   mixed_precision: true  # Enable mixed precision training
-  gradient_accumulation_steps: 1  # Can be increased if needed
   weight_decay: 0.000001  # Add weight decay for regularization (1e-6)
   memory_efficient_eval: true  # Use memory-efficient evaluation
   # SDF-related parameters
@@ -41,8 +33,3 @@ train:
   sdf_alpha: 50.0  # Sharpness parameter for SDF to occupancy conversion
   # Loss weight experiments - [projection_weight, sdf_2d_weight]
   loss_weight_experiments: [[0.5, 1.0]]
-log:
-  i_eval: 5000  # Only evaluate at final epoch
-  i_save: 5000  # Only save checkpoint at final epoch
-  save_final_model: true  # Save final 3D reconstruction and network
-  save_intermediate: false  # Don't save intermediate results

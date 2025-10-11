@@ -1,12 +1,10 @@
 import os
 import math
 import yaml
-import json
 import torch
 import numpy as np
 import os.path as osp
 from tqdm import tqdm
-from shutil import copyfile
 import matplotlib.pyplot as plt
 
 from .network import get_network
@@ -31,27 +29,16 @@ class Trainer:
     def __init__(self, cfg, device="cuda"):
 
         # Args
-        self.global_step = 0
         self.conf = cfg
-        self.n_fine = cfg["render"]["n_fine"]
         self.epochs = cfg["train"]["epoch"]
-        self.i_eval = cfg["log"]["i_eval"]
-        self.i_save = cfg["log"]["i_save"]
         self.netchunk = cfg["render"]["netchunk"]
         
         # Memory optimization settings
         self.use_mixed_precision = cfg.get("train", {}).get("mixed_precision", True)
-        self.gradient_accumulation_steps = cfg.get("train", {}).get("gradient_accumulation_steps", 1)
         self.memory_efficient_eval = cfg.get("train", {}).get("memory_efficient_eval", True)
         
         # Initialize AMP scaler for mixed precision training
         self.scaler = torch.amp.GradScaler('cuda', enabled=self.use_mixed_precision)
-  
-        # Log directory and output paths
-        self.expdir = osp.join(cfg["exp"]["expdir"], cfg["exp"]["expname"])
-        self.ckptdir = osp.join(self.expdir, "ckpt.tar")
-        self.ckptdir_backup = osp.join(self.expdir, "ckpt_backup.tar")
-        self.evaldir = osp.join(self.expdir, "eval")
         
         # Setup output directories for batch processing
         base_output_dir = cfg["exp"].get("output_recon_dir", "./logs/reconstructions/")
@@ -62,10 +49,8 @@ class Trainer:
         experiment_name = str(self.current_model_id)
         self.output_recon_dir = osp.join(base_output_dir, original_model_id, experiment_name)
         
-        os.makedirs(self.evaldir, exist_ok=True)
         os.makedirs(self.output_recon_dir, exist_ok=True)
 
-        #######################################
         # Load CT geometry configuration
         configPath = cfg['exp']['dataconfig']
         with open(configPath, "r") as handle:
@@ -87,11 +72,6 @@ class Trainer:
         if not os.path.exists(gt_volume_path):
             raise FileNotFoundError(f"Ground truth volume not found: {gt_volume_path}")
 
-        # No need for datadir anymore - we generate projections from GT volume directly
-        print("Generating projections from 3D ground truth volume...")
-
-        # VARIABLE                                          DESCRIPTION                    UNITS
-        # -------------------------------------------------------------------------------------
         dsd = data["DSD"] # Distance Source Detector   mm   
         dso = data["DSO"] # Distance Source Origin      mm 
         dde = data["DDE"]
@@ -99,6 +79,7 @@ class Trainer:
         # Detector parameters
         proj_size = np.array(data["nDetector"])  # number of pixels              (px)
         proj_reso = np.array(data["dDetector"]) 
+
         # Image parameters
         image_size = np.array(data["nVoxel"])  # number of voxels              (vx)
         image_reso = np.array(data["dVoxel"])  # size of each voxel            (mm)
@@ -106,8 +87,7 @@ class Trainer:
         first_proj_angle = [-data["first_projection_angle"][1], data["first_projection_angle"][0]]
         second_proj_angle = [-data["second_projection_angle"][1], data["second_projection_angle"][0]]
 
-        #############
-        #### first_projection
+        # First_projection
         from_source_vec= (0,-dso[0],0)
         from_rot_vec = (-1,0,0)
         to_source_vec = axis_rotation((0,0,1), angle=first_proj_angle[0]/180*np.pi, vectors=from_source_vec)
@@ -118,9 +98,8 @@ class Trainer:
         proj_axis, proj_angle = rotation_matrix_to_axis_angle(rot_mat)
 
         self.ct_projector_first = ConeBeam3DProjector(image_size, image_reso, proj_angle, proj_axis, proj_size, proj_reso, dde[0], dso[0])
-        # proj_first = ct_projector.forward_project(phantom.squeeze(4))  # [bs, x, y, z] -> [bs, n, h, w]
 
-        ### second projection
+        # Second_projection
         from_source_vec= (0,-dso[1],0)
         from_rot_vec = (-1,0,0)
         to_source_vec = axis_rotation((0,0,1), angle=second_proj_angle[0]/180*np.pi, vectors=from_source_vec)
@@ -131,9 +110,7 @@ class Trainer:
         proj_axis, proj_angle = rotation_matrix_to_axis_angle(rot_mat)
 
         self.ct_projector_second = ConeBeam3DProjector(image_size, image_reso, proj_angle, proj_axis, proj_size, proj_reso, dde[1], dso[1])
-        # proj_second = ct_projector.forward_project(phantom.squeeze(4))  # [bs, x, y, z] -> [bs, n, h, w]
         
-        #####
         # Load 3D ground truth volume and generate projections (simplified)
         phantom = np.load(gt_volume_path)
         phantom = np.transpose(phantom, (1,2,0))[::,::-1,::-1]
@@ -146,17 +123,42 @@ class Trainer:
         data["projections"] = torch.cat((train_projs_one,train_projs_two), 1)
         print(f"Generated projections from 3D volume: {data['projections'].shape}")
         
-        # Generate 2D SDF targets from projections for SDF loss
-        from src.render.sdf_utils import occupancy_to_sdf_2d
-        proj_sdf_one = occupancy_to_sdf_2d(train_projs_one.squeeze(0).squeeze(0), voxel_size=proj_reso[0])  # [512, 512]
-        proj_sdf_two = occupancy_to_sdf_2d(train_projs_two.squeeze(0).squeeze(0), voxel_size=proj_reso[1])  # [512, 512]
-        data["sdf_projections"] = torch.cat((proj_sdf_one[None, None, :], proj_sdf_two[None, None, :]), 1)  # [1, 2, 512, 512]
-        print(f"Generated 2D SDF targets: {data['sdf_projections'].shape}")
+        # Dataset preparation based on mode
+        self.use_sdf = cfg.get("train", {}).get("use_sdf", True)
+        
+        # Generate 2D SDF targets only if using SDF mode
+        if self.use_sdf:
+            from src.render.sdf_utils import occupancy_to_sdf_2d
+            proj_sdf_one = occupancy_to_sdf_2d(train_projs_one.squeeze(0).squeeze(0), voxel_size=proj_reso[0])  # [512, 512]
+            proj_sdf_two = occupancy_to_sdf_2d(train_projs_two.squeeze(0).squeeze(0), voxel_size=proj_reso[1])  # [512, 512]
+            data["sdf_projections"] = torch.cat((proj_sdf_one[None, None, :], proj_sdf_two[None, None, :]), 1)  # [1, 2, 512, 512]
+            print(f"Generated 2D SDF targets: {data['sdf_projections'].shape}")
+        else:
+            # Create empty tensor for occupancy mode to avoid None errors
+            proj_shape = train_projs_one.shape
+            data["sdf_projections"] = torch.zeros((1, 2, proj_shape[2], proj_shape[3]), dtype=torch.float32, device=train_projs_one.device)
+            print("Occupancy mode: No SDF targets generated (using dummy tensor)")
 
         # Dataset
         self.dataconfig = data
         self.train_dset = Dataset(data, device)
         self.voxels = self.train_dset.voxels
+        
+        # Set last_activation based on use_sdf
+        cfg["network"]["use_sdf"] = True if self.use_sdf else False
+            
+        # Set loss weights based on use_sdf
+        if self.use_sdf:
+            # Use weights from config for SDF mode
+            self.loss_weights = cfg.get("train", {}).get("current_loss_weights", [1.0, 1.0])
+        else:
+            # Force projection weight to 1.0 for occupancy mode, disable SDF loss
+            self.loss_weights = [1.0, 0.0]
+            
+        self.projection_weight, self.sdf_loss_weight = self.loss_weights
+        
+        print(f"SDF Mode: {self.use_sdf}")
+        print(f"Loss Weights - Projection: {self.projection_weight}, SDF: {self.sdf_loss_weight}")
 
         # Network
         network = get_network(cfg["network"]["net_type"])
@@ -164,10 +166,6 @@ class Trainer:
         encoder = get_encoder(**cfg["encoder"])
         self.net = network(encoder, **cfg["network"]).to(device)
         self.grad_vars = list(self.net.parameters())
-        self.net_fine = None
-        if self.n_fine > 0:
-            self.net_fine = network(encoder, **cfg["network"]).to(device)
-            self.grad_vars += list(self.net_fine.parameters())
         cfg["network"]["net_type"] = net_type
 
         # Optimizer with memory-efficient settings
@@ -182,30 +180,7 @@ class Trainer:
             weight_decay=weight_decay_val,  # Ensure proper type conversion
             eps=1e-8
         )
-        self.lr_scheduler = torch.optim.lr_scheduler.StepLR(
-            optimizer=self.optimizer, step_size=cfg["train"]["lrate_step"], gamma=cfg["train"]["lrate_gamma"])
 
-        # Load checkpoints
-        self.epoch_start = 0
-        if cfg["train"]["resume"] and osp.exists(self.ckptdir):
-            print(f"Load checkpoints from {self.ckptdir}.")
-            try:
-                ckpt = torch.load(self.ckptdir, map_location=device)  # Load to specific device
-                self.epoch_start = ckpt["epoch"] + 1
-                self.optimizer.load_state_dict(ckpt["optimizer"])
-                if "scaler" in ckpt and self.use_mixed_precision:
-                    self.scaler.load_state_dict(ckpt["scaler"])
-                self.global_step = self.epoch_start #* len(self.train_dloader)
-                self.net.load_state_dict(ckpt["network"])
-                if self.n_fine > 0 and "network_fine" in ckpt and ckpt["network_fine"] is not None:
-                    self.net_fine.load_state_dict(ckpt["network_fine"])
-                print(f"Successfully loaded checkpoint from epoch {ckpt['epoch']}")
-            except Exception as e:
-                print(f"Warning: Failed to load checkpoint: {e}")
-                print("Starting training from scratch.")
-                self.epoch_start = 0
-
-        # Loss tracking for plotting
         self.training_losses = []
         
         # Best model tracking
@@ -213,13 +188,6 @@ class Trainer:
         self.best_epoch = 0
         self.best_model_state = None
 
-    def args2string(self, hp):
-        """
-        Transfer args to string.
-        """
-        json_hp = json.dumps(hp, indent=2)
-        return "".join("\t" + line for line in json_hp.splitlines(True))
-    
     def save_loss_plot(self):
         """
         Save training loss plot for current model.
@@ -244,174 +212,88 @@ class Trainer:
         """
         Main loop with memory optimizations.
         """
-        iter_per_epoch = 1 #len(self.train_dloader)
-        pbar = tqdm(total= iter_per_epoch * self.epochs, leave=True)
-        if self.epoch_start > 0:
-            pbar.update(self.epoch_start*iter_per_epoch)
-
-        for idx_epoch in range(self.epoch_start, self.epochs+1):
+        for idx_epoch in tqdm(range(1, self.epochs+1)):
             
             # Clear cache before evaluation
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
                 
-            # Evaluate and save final results
-            save_final = self.conf.get("log", {}).get("save_final_model", True)
-            save_intermediate = self.conf.get("log", {}).get("save_intermediate", False)
-            
-            should_evaluate = False
-            # Only save intermediate results if specifically requested
-            if save_intermediate and (idx_epoch % self.i_eval == 0) and self.i_eval > 0:
-                should_evaluate = True  # Evaluate intermediate epochs if save_intermediate is True
-                
-            if should_evaluate:  
-                self.net.eval()
-                with torch.no_grad():
-                    if self.memory_efficient_eval:
-                        # Process voxels in smaller chunks during evaluation
-                        eval_chunk_size = self.netchunk // 4  # Use smaller chunks for evaluation
-                        image_pred = self.run_network_chunked(
-                            self.voxels, 
-                            self.net_fine if self.net_fine is not None else self.net, 
-                            eval_chunk_size
-                        )
-                    else:
-                        image_pred = run_network(self.voxels, self.net_fine if self.net_fine is not None else self.net, self.netchunk)
-                    
-                    image_pred = (image_pred.squeeze()).detach().cpu().numpy()
-                    
-                    # Only save intermediate results (not final results)
-                    np.save(self.evaldir + "/" + str(idx_epoch), image_pred)
-                    
-                    # Free memory immediately after evaluation
-                    del image_pred
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
-
             # Train
-            self.global_step += 1
             self.net.train()
             
             # Memory-efficient training step
-            loss_train = self.train_step_memory_efficient(self.train_dset, global_step=self.global_step, idx_epoch=idx_epoch)
+            loss_train = self.train_step_memory_efficient(self.train_dset)
             
             # Track loss for plotting
             current_loss = loss_train['loss']
             self.training_losses.append(current_loss)
             
-            # Track best model
-            if current_loss < self.best_loss:
-                self.best_loss = current_loss
-                self.best_epoch = idx_epoch
-                # Save best model state
-                self.best_model_state = {
-                    'network': self.net.state_dict().copy(),
-                    'network_fine': self.net_fine.state_dict().copy() if self.n_fine > 0 else None,
-                    'epoch': idx_epoch,
-                    'loss': current_loss
-                }
-                print(f"New best model at epoch {idx_epoch} with loss {current_loss:.6f}")
+            print(f"epoch={idx_epoch}/{self.epochs}, loss={current_loss:.6f}")
             
-            # Update learning rate after optimizer step
-            self.lr_scheduler.step()
-            
-            pbar.set_description(f"epoch={idx_epoch}/{self.epochs}, loss={current_loss:.6f}, best={self.best_loss:.6f}@{self.best_epoch}, lr={self.optimizer.param_groups[0]['lr']:.3g}")
-            pbar.update(1)
-            
-            # Save checkpoints (only if save_intermediate is True or at final epoch)
-            should_save_checkpoint = False
-            if idx_epoch == self.epochs and save_final:
-                should_save_checkpoint = True  # Always save at final epoch if save_final is True
-            elif save_intermediate and (idx_epoch % self.i_save == 0) and self.i_save > 0 and idx_epoch > 0:
-                should_save_checkpoint = True  # Save intermediate checkpoints if save_intermediate is True
-                
-            if should_save_checkpoint:
-                if osp.exists(self.ckptdir):
-                    copyfile(self.ckptdir, self.ckptdir_backup)
-                tqdm.write(f"[SAVE] epoch: {idx_epoch}/{self.epochs}, path: {self.ckptdir}")
-                
-                # Save with memory-efficient settings
-                save_dict = {
-                    "epoch": idx_epoch,
-                    "network": self.net.state_dict(),
-                    "network_fine": self.net_fine.state_dict() if self.n_fine > 0 else None,
-                    "optimizer": self.optimizer.state_dict(),
-                }
-                
-                if self.use_mixed_precision:
-                    save_dict["scaler"] = self.scaler.state_dict()
-                    
-                torch.save(save_dict, self.ckptdir)
-                
-                # Clear cache after saving
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-
         # Save loss plot after training completion
         self.save_loss_plot()
         
-        # Evaluate and save the best model at the end
-        if self.best_model_state is not None:
-            print(f"\nEvaluating best model from epoch {self.best_epoch} with loss {self.best_loss:.6f}")
-            
-            # Load best model state
-            self.net.load_state_dict(self.best_model_state['network'])
-            if self.n_fine > 0 and self.best_model_state['network_fine'] is not None:
-                self.net_fine.load_state_dict(self.best_model_state['network_fine'])
-            
-            # Evaluate best model
-            self.net.eval()
-            with torch.no_grad():
-                if self.memory_efficient_eval:
-                    eval_chunk_size = self.netchunk // 4
-                    image_pred = self.run_network_chunked(
-                        self.voxels, 
-                        self.net_fine if self.net_fine is not None else self.net, 
-                        eval_chunk_size
-                    )
-                else:
-                    image_pred = run_network(self.voxels, self.net_fine if self.net_fine is not None else self.net, self.netchunk)
-                
-                image_pred = (image_pred.squeeze()).detach().cpu().numpy()
-                
-                # Save best model results with all the comprehensive outputs
-                self._save_best_model_results(image_pred, self.best_epoch)
+        # Evaluate and save the last model at the end
+        print(f"\nEvaluating last model from epoch {self.epochs}")
         
-        tqdm.write(f"Training complete! Best model from epoch {self.best_epoch} with loss {self.best_loss:.6f}")
-        tqdm.write(f"See logs in {self.expdir}")
+        # Evaluate last model (current state)
+        self.net.eval()
+        with torch.no_grad():
+            if self.memory_efficient_eval:
+                eval_chunk_size = self.netchunk // 4
+                model_pred = self.run_network_chunked(
+                    self.voxels, 
+                    self.net,
+                    eval_chunk_size
+                )
+            else:
+                model_pred = run_network(self.voxels, self.net, self.netchunk)
+            
+            model_pred = (model_pred.squeeze()).detach().cpu().numpy()
+            
+            # Save last model results with all the comprehensive outputs
+            self._save_best_model_results(model_pred, self.epochs)
         
-    def _save_best_model_results(self, image_pred, epoch):
+        tqdm.write(f"Training complete! Saved last model from epoch {self.epochs}")
+        
+    def _save_best_model_results(self, model_pred, epoch):
         """Save comprehensive results for the best model."""
         print(f"Saving best model results from epoch {epoch}...")
         
-        # Save SDF reconstruction
-        recon_filename = f"recon_{self.current_model_id}.npy"
-        recon_path = osp.join(self.output_recon_dir, recon_filename)
-        np.save(recon_path, image_pred)
-        print(f"Saved best SDF reconstruction: {recon_path}")
+        # Handle SDF vs Occupancy modes differently
+        pred_tensor = torch.tensor(model_pred, dtype=torch.float32, device=self.train_dset.projs.device)[None, ...]
         
-        # Convert to occupancy and save all comprehensive outputs
-        sdf_pred_tensor = torch.tensor(image_pred, dtype=torch.float32, device=self.train_dset.projs.device)[None, ...]
-        
-        # Save 3D SDF prediction
-        sdf_3d_filename = f"sdf_3d_{self.current_model_id}.npy"
-        sdf_3d_path = osp.join(self.output_recon_dir, sdf_3d_filename)
-        np.save(sdf_3d_path, image_pred)
-        print(f"Saved 3D SDF prediction: {sdf_3d_path}")
-        
-        # Convert SDF to occupancy and save all other outputs (projections, images, etc.)
-        from src.render.sdf_utils import sdf_to_occupancy, sdf_3d_to_occupancy_to_sdf_2d
-        occupancy_pred = sdf_to_occupancy(sdf_pred_tensor, alpha=50.0)
-        
-        # Save 3D occupancy prediction
-        occupancy_3d_filename = f"recon_occupancy_{self.current_model_id}.npy"
-        occupancy_3d_path = osp.join(self.output_recon_dir, occupancy_3d_filename)
-        occupancy_3d_data = occupancy_pred.squeeze().detach().cpu().numpy()
-        np.save(occupancy_3d_path, occupancy_3d_data)
-        print(f"Saved 3D occupancy prediction: {occupancy_3d_path}")
+        if self.use_sdf:
+            # SDF mode: model generates SDF, we convert to occupancy for projections
+            print("SDF mode: Model generated 3D SDF")
+            sdf_3d_filename = f"sdf_3d_{self.current_model_id}.npy"
+            sdf_3d_path = osp.join(self.output_recon_dir, sdf_3d_filename)
+            np.save(sdf_3d_path, model_pred)
+            print(f"Saved 3D SDF prediction: {sdf_3d_path}")
+            
+            # Convert SDF to occupancy for projections
+            from src.render.sdf_utils import sdf_to_occupancy
+            occupancy_for_proj = sdf_to_occupancy(pred_tensor, alpha=50.0)
+            
+            # Save converted occupancy
+            occupancy_3d_filename = f"recon_occupancy_{self.current_model_id}.npy"
+            occupancy_3d_path = osp.join(self.output_recon_dir, occupancy_3d_filename)
+            occupancy_3d_data = occupancy_for_proj.squeeze().detach().cpu().numpy()
+            np.save(occupancy_3d_path, occupancy_3d_data)
+            print(f"Saved occupancy converted from SDF: {occupancy_3d_path}")
+            
+        else:
+            # Occupancy mode: model generates occupancy directly
+            print("Occupancy mode: Model generated 3D occupancy")
+            occupancy_3d_filename = f"recon_occupancy_{self.current_model_id}.npy"
+            occupancy_3d_path = osp.join(self.output_recon_dir, occupancy_3d_filename)
+            np.save(occupancy_3d_path, model_pred)
+            print(f"Saved 3D occupancy prediction: {occupancy_3d_path}")
+            
+            occupancy_for_proj = pred_tensor
         
         # Save all other comprehensive outputs (GT, projections, images, comparisons, network)
-        self._save_comprehensive_outputs(sdf_pred_tensor, occupancy_pred, epoch)
+        self._save_comprehensive_outputs(pred_tensor, occupancy_for_proj, epoch)
 
     def run_network_chunked(self, inputs, fn, chunk_size):
         """
@@ -439,7 +321,7 @@ class Trainer:
         
         return out
 
-    def train_step_memory_efficient(self, data, global_step, idx_epoch):
+    def train_step_memory_efficient(self, data):
         """
         Memory-efficient training step with gradient accumulation and mixed precision.
         """
@@ -449,18 +331,16 @@ class Trainer:
         total_loss = 0.0
         
         # Gradient accumulation loop
-        for acc_step in range(self.gradient_accumulation_steps):
-            with torch.amp.autocast('cuda', enabled=self.use_mixed_precision, dtype=torch.float16):
-                loss = self.compute_loss(data, global_step, idx_epoch)
-                scaled_loss = loss["loss"] / self.gradient_accumulation_steps
-                total_loss += loss["loss"].item()
-            
-            # Backward pass with gradient scaling
-            self.scaler.scale(scaled_loss).backward()
-            
-            # Clear intermediate tensors
-            del loss, scaled_loss
-            
+        with torch.amp.autocast('cuda', enabled=self.use_mixed_precision, dtype=torch.float16):
+            loss = self.compute_loss(data)
+            total_loss += loss["loss"].item()
+        
+        # Backward pass with gradient scaling
+        self.scaler.scale(loss["loss"]).backward()
+        
+        # Clear intermediate tensors
+        del loss
+
         # Optimizer step with gradient scaling
         self.scaler.step(self.optimizer)
         self.scaler.update()
@@ -470,13 +350,13 @@ class Trainer:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         
-        return {"loss": total_loss / self.gradient_accumulation_steps}
+        return {"loss": total_loss}
 
-    def train_step(self, data, global_step, idx_epoch):
+    def train_step(self, data):
         """
         Legacy training step - kept for compatibility
         """
-        return self.train_step_memory_efficient(data, global_step, idx_epoch)
+        return self.train_step_memory_efficient(data)
         
     def _save_comprehensive_outputs(self, sdf_pred_tensor, occupancy_pred, epoch):
         """Save comprehensive outputs including projections, images, and comparisons."""
@@ -508,58 +388,81 @@ class Trainer:
         np.save(pred_projs_path, pred_projs_data)
         print(f"Saved predicted projections: {pred_projs_path}")
         
-        # Generate and save 2D SDF predictions
-        detector_pixel_size = self.dataconfig["dDetector"][0]
-        from src.render.sdf_utils import sdf_3d_to_occupancy_to_sdf_2d
-        pred_sdf_2d, _ = sdf_3d_to_occupancy_to_sdf_2d(
-            sdf_pred_tensor, self.ct_projector_first, self.ct_projector_second,
-            alpha=50.0, voxel_size_2d=detector_pixel_size
-        )
-        
-        pred_sdf_2d_filename = f"sdf_2d_pred_{self.current_model_id}.npy"
-        pred_sdf_2d_path = osp.join(self.output_recon_dir, pred_sdf_2d_filename)
-        pred_sdf_2d_data = pred_sdf_2d.detach().cpu().numpy()
-        np.save(pred_sdf_2d_path, pred_sdf_2d_data)
-        print(f"Saved 2D SDF predictions: {pred_sdf_2d_path}")
-        
-        # Save ground truth 2D SDF if available
-        if "sdf_projections" in self.dataconfig:
-            gt_sdf_2d_filename = f"sdf_2d_gt_{self.current_model_id}.npy"
-            gt_sdf_2d_path = osp.join(self.output_recon_dir, gt_sdf_2d_filename)
-            gt_sdf_2d_data = self.dataconfig["sdf_projections"].detach().cpu().numpy()
-            np.save(gt_sdf_2d_path, gt_sdf_2d_data)
-            print(f"Saved 2D SDF ground truth: {gt_sdf_2d_path}")
-        else:
-            gt_sdf_2d_data = None
-        
-        # Create comparison images
-        comparison_path = osp.join(self.output_recon_dir, f"comparison_{self.current_model_id}.png")
-        fig, axes = plt.subplots(2, 4, figsize=(16, 8))
-        
-        for i in range(2):  # Two views
-            # Ground truth occupancy projection
-            axes[i, 0].imshow(gt_projs_data[0, i], cmap='gray')
-            axes[i, 0].set_title(f'GT Occupancy View {i+1}')
-            axes[i, 0].axis('off')
+        # Generate and save 2D SDF predictions only in SDF mode
+        if self.use_sdf:
+            detector_pixel_size = self.dataconfig["dDetector"][0]
+            from src.render.sdf_utils import sdf_3d_to_occupancy_to_sdf_2d
+            pred_sdf_2d, _ = sdf_3d_to_occupancy_to_sdf_2d(
+                sdf_pred_tensor, self.ct_projector_first, self.ct_projector_second,
+                alpha=50.0, voxel_size_2d=detector_pixel_size
+            )
             
-            # Predicted occupancy projection
-            axes[i, 1].imshow(pred_projs_data[0, i], cmap='gray')
-            axes[i, 1].set_title(f'Pred Occupancy View {i+1}')
-            axes[i, 1].axis('off')
+            pred_sdf_2d_filename = f"sdf_2d_pred_{self.current_model_id}.npy"
+            pred_sdf_2d_path = osp.join(self.output_recon_dir, pred_sdf_2d_filename)
+            pred_sdf_2d_data = pred_sdf_2d.detach().cpu().numpy()
+            np.save(pred_sdf_2d_path, pred_sdf_2d_data)
+            print(f"Saved 2D SDF predictions: {pred_sdf_2d_path}")
             
-            # Ground truth SDF (if available)
-            if gt_sdf_2d_data is not None:
-                axes[i, 2].imshow(gt_sdf_2d_data[0, i], cmap='RdBu_r')
-                axes[i, 2].set_title(f'GT SDF View {i+1}')
-                axes[i, 2].axis('off')
+            # Save ground truth 2D SDF if in SDF mode
+            if self.use_sdf:
+                gt_sdf_2d_filename = f"sdf_2d_gt_{self.current_model_id}.npy"
+                gt_sdf_2d_path = osp.join(self.output_recon_dir, gt_sdf_2d_filename)
+                gt_sdf_2d_data = self.dataconfig["sdf_projections"].detach().cpu().numpy()
+                np.save(gt_sdf_2d_path, gt_sdf_2d_data)
+                print(f"Saved 2D SDF ground truth: {gt_sdf_2d_path}")
             else:
-                axes[i, 2].text(0.5, 0.5, 'No GT SDF', ha='center', va='center')
-                axes[i, 2].axis('off')
+                gt_sdf_2d_data = None
+        else:
+            # Occupancy mode: no SDF predictions
+            pred_sdf_2d_data = None
+            gt_sdf_2d_data = None
+            print("Occupancy mode: No 2D SDF predictions generated")
+        
+        # Create comparison images based on mode
+        comparison_path = osp.join(self.output_recon_dir, f"comparison_{self.current_model_id}.png")
+        
+        if self.use_sdf and pred_sdf_2d_data is not None:
+            # SDF mode: show both occupancy and SDF projections
+            fig, axes = plt.subplots(2, 4, figsize=(16, 8))
             
-            # Predicted SDF
-            axes[i, 3].imshow(pred_sdf_2d_data[0, i], cmap='RdBu_r')
-            axes[i, 3].set_title(f'Pred SDF View {i+1}')
-            axes[i, 3].axis('off')
+            for i in range(2):  # Two views
+                # Ground truth occupancy projection
+                axes[i, 0].imshow(gt_projs_data[0, i], cmap='gray')
+                axes[i, 0].set_title(f'GT Occupancy View {i+1}')
+                axes[i, 0].axis('off')
+                
+                # Predicted occupancy projection
+                axes[i, 1].imshow(pred_projs_data[0, i], cmap='gray')
+                axes[i, 1].set_title(f'Pred Occupancy View {i+1}')
+                axes[i, 1].axis('off')
+                
+                # Ground truth SDF (if available)
+                if gt_sdf_2d_data is not None:
+                    axes[i, 2].imshow(gt_sdf_2d_data[0, i], cmap='RdBu_r')
+                    axes[i, 2].set_title(f'GT SDF View {i+1}')
+                    axes[i, 2].axis('off')
+                else:
+                    axes[i, 2].text(0.5, 0.5, 'No GT SDF', ha='center', va='center')
+                    axes[i, 2].axis('off')
+                
+                # Predicted SDF
+                axes[i, 3].imshow(pred_sdf_2d_data[0, i], cmap='RdBu_r')
+                axes[i, 3].set_title(f'Pred SDF View {i+1}')
+                axes[i, 3].axis('off')
+        else:
+            # Occupancy mode: only show occupancy projections
+            fig, axes = plt.subplots(2, 2, figsize=(8, 8))
+            
+            for i in range(2):  # Two views
+                # Ground truth occupancy projection
+                axes[i, 0].imshow(gt_projs_data[0, i], cmap='gray')
+                axes[i, 0].set_title(f'GT Occupancy View {i+1}')
+                axes[i, 0].axis('off')
+                
+                # Predicted occupancy projection
+                axes[i, 1].imshow(pred_projs_data[0, i], cmap='gray')
+                axes[i, 1].set_title(f'Pred Occupancy View {i+1}')
+                axes[i, 1].axis('off')
         
         plt.tight_layout()
         plt.savefig(comparison_path, dpi=150, bbox_inches='tight')
@@ -570,16 +473,14 @@ class Trainer:
         network_filename = f"network_{self.current_model_id}.pth"
         network_path = osp.join(self.output_recon_dir, network_filename)
         torch.save({
-            'network': self.best_model_state['network'],
-            'network_fine': self.best_model_state['network_fine'],
+            'network': self.net.state_dict(),
             'model_id': self.current_model_id,
             'epoch': epoch,
-            'loss': self.best_loss,
             'config': self.conf
         }, network_path)
-        print(f"Saved best network: {network_path}")
+        print(f"Saved last network: {network_path}")
 
-    def compute_loss(self, data, global_step, idx_epoch):
+    def compute_loss(self, data):
         """
         Training step
         """

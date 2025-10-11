@@ -1,11 +1,11 @@
-import numpy as np
-from scipy import ndimage
-from scipy.spatial import KDTree
 import os
-import argparse
-import pandas as pd
 import json
+import argparse
+import numpy as np
+import pandas as pd
+from scipy import ndimage
 from datetime import datetime
+from scipy.spatial import KDTree
 from src.config.configloading import load_config
 
 
@@ -274,9 +274,9 @@ def evaluate_single_model(
             'evaluation_success': True,
             **metrics
         }
-        
-        print(f"  ✅ Success: Dice={metrics['dice']:.4f}, Ot(1mm)={metrics['ot_1mm']:.4f}")
-        
+
+        print(f"  ✅ Success: Dice={metrics['dice']:.4f}, Ot(1mm)={metrics['ot_1mm']:.4f}, Ot(2mm)={metrics['ot_2mm']:.4f}, Chamfer={metrics['chamfer_distance']:.4f}mm")
+
     except Exception as e:
         print(f"  ❌ Error: {str(e)}")
         result = {
@@ -333,22 +333,13 @@ def batch_evaluate_models(
         print(f"❌ Error loading config: {e}")
         return pd.DataFrame()
     
-    # Get paths and model numbers
+    # Get paths from config
     input_data_dir = cfg["exp"].get("input_data_dir", "./data/GT_volumes/")
     output_recon_dir = cfg["exp"].get("output_recon_dir", "./logs/reconstructions/")
     
-    if model_numbers is None:
-        model_numbers = cfg["exp"].get("model_numbers", [1])
-    
-    # Get experiment parameters for generating filenames
-    lrates = cfg["train"]["lrate"] if isinstance(cfg["train"]["lrate"], list) else [cfg["train"]["lrate"]]
-    loss_weight_experiments = cfg["train"].get("loss_weight_experiments", [[1.0, 1.0, 0.1]])
-    
     print(f"Input GT directory: {input_data_dir}")
     print(f"Reconstructions directory: {output_recon_dir}")
-    print(f"Models to evaluate: {model_numbers}")
-    print(f"Learning rates: {lrates}")
-    print(f"Loss weight experiments: {loss_weight_experiments}")
+    print(f"Scanning for recon_occupancy_*.npy files...")
     print(f"Evaluation parameters:")
     print(f"  Voxel spacing: {voxel_spacing} mm")
     print(f"  GT threshold: {threshold_label}")
@@ -358,52 +349,75 @@ def batch_evaluate_models(
     # Create output directory
     os.makedirs(output_dir, exist_ok=True)
     
-    # Evaluate each model and experiment combination
+    # Discover all reconstruction files automatically
+    recon_files = []
+    for root, dirs, files in os.walk(output_recon_dir):
+        for file in files:
+            if file.startswith("recon_occupancy_") and file.endswith(".npy"):
+                full_path = os.path.join(root, file)
+                # Extract experiment name from filename (remove recon_occupancy_ prefix and .npy suffix)
+                experiment_name = file[16:-4]  # Remove "recon_occupancy_" (16 chars) and ".npy" (4 chars)
+                recon_files.append((experiment_name, full_path))
+    
+    print(f"Found {len(recon_files)} reconstruction files")
+    
+    # Evaluate each found reconstruction
     results = []
     successful_evaluations = 0
     failed_evaluations = 0
     
-    for model_id in model_numbers:
-        print(f"\n📊 Evaluating Model {model_id}")
+    for experiment_name, recon_path in recon_files:
+        print(f"\n📊 Evaluating {experiment_name}")
         print("-" * 40)
         
-        # Define ground truth path (same for all experiments)
-        gt_path = os.path.join(input_data_dir, f"{model_id}.npy")
+        # Extract base model ID from experiment name (first part before _lr)
+        try:
+            base_model_id = experiment_name.split('_lr')[0]
+            gt_path = os.path.join(input_data_dir, f"{base_model_id}.npy")
+        except:
+            print(f"  ⚠️  Cannot extract model ID from {experiment_name}, skipping")
+            continue
         
-        # Evaluate each experiment combination
-        for lr in lrates:
-            for loss_weights in loss_weight_experiments:
-                proj_w, sdf_w = loss_weights
-                experiment_name = f"{model_id}_lr{lr}_proj{proj_w}_sdf{sdf_w}"
-                # Updated path structure: output_recon_dir/model_id/experiment_name/recon_occupancy_experiment_name.npy
-                recon_path = os.path.join(output_recon_dir, str(model_id), experiment_name, f"recon_occupancy_{experiment_name}.npy")
-                
-                print(f"  Experiment: {experiment_name}")
-                
-                # Evaluate single experiment
-                result = evaluate_single_model(
-                    model_id=experiment_name,  # Use experiment name as identifier
-                    gt_volume_path=gt_path,
-                    recon_volume_path=recon_path,
-                    voxel_spacing=voxel_spacing,
-                    threshold_label=threshold_label,
-                    threshold_output=threshold_output,
-                    apply_rotation=apply_rotation
-                )
-                
-                # Add experiment metadata
-                result['base_model_id'] = model_id
-                result['learning_rate'] = lr
-                result['projection_weight'] = proj_w
-                result['sdf_weight'] = sdf_w
-                result['experiment_name'] = experiment_name
-                
-                results.append(result)
-                
-                if result['evaluation_success']:
-                    successful_evaluations += 1
-                else:
-                    failed_evaluations += 1
+        print(f"  Base model: {base_model_id}")
+        print(f"  Reconstruction: {recon_path}")
+        
+        # Evaluate single experiment
+        result = evaluate_single_model(
+            model_id=experiment_name,  # Use experiment name as identifier
+            gt_volume_path=gt_path,
+            recon_volume_path=recon_path,
+            voxel_spacing=voxel_spacing,
+            threshold_label=threshold_label,
+            threshold_output=threshold_output,
+            apply_rotation=apply_rotation
+        )
+        
+        # Add experiment metadata (parse from experiment name if possible)
+        result['base_model_id'] = base_model_id
+        result['experiment_name'] = experiment_name
+        
+        # Try to parse experiment parameters from filename
+        try:
+            parts = experiment_name.split('_')
+            for part in parts:
+                if part.startswith('lr'):
+                    result['learning_rate'] = float(part[2:])
+                elif part.startswith('proj'):
+                    result['projection_weight'] = float(part[4:])
+                elif part.startswith('sdf'):
+                    result['sdf_weight'] = float(part[3:])
+        except:
+            # If parsing fails, set defaults
+            result['learning_rate'] = None
+            result['projection_weight'] = None  
+            result['sdf_weight'] = None
+        
+        results.append(result)
+        
+        if result['evaluation_success']:
+            successful_evaluations += 1
+        else:
+            failed_evaluations += 1
     
     # Create DataFrame
     df_results = pd.DataFrame(results)
@@ -428,7 +442,7 @@ def batch_evaluate_models(
         
         summary_stats = {
             'timestamp': timestamp,
-            'total_models': len(model_numbers),
+            'total_experiments': len(recon_files),
             'successful_evaluations': successful_evaluations,
             'failed_evaluations': failed_evaluations,
             'parameters': {
@@ -458,7 +472,7 @@ def batch_evaluate_models(
     print(f"\n{'=' * 60}")
     print("EVALUATION SUMMARY")
     print(f"{'=' * 60}")
-    print(f"Total models: {len(model_numbers)}")
+    print(f"Total experiments: {len(recon_files)}")
     print(f"Successful: {successful_evaluations}")
     print(f"Failed: {failed_evaluations}")
     
