@@ -21,7 +21,7 @@ class DensityNetwork(nn.Module):
 
         # Activations
         self.activations = nn.ModuleList([nn.LeakyReLU(inplace=True) for i in range(0, num_layers-1, 1)])  # Use inplace for memory
-        self.activations.append(nn.Linear if use_sdf else nn.Sigmoid())
+        self.activations.append(nn.Identity() if use_sdf else nn.Sigmoid())
 
         # Apply SDF-tuned Xavier initialization if we are on SDF mode
         if use_sdf:

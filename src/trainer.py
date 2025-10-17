@@ -161,12 +161,12 @@ class Trainer:
         print(f"Loss Weights - Projection: {self.projection_weight}, SDF: {self.sdf_loss_weight}")
 
         # Network
-        network = get_network(cfg["network"]["net_type"])
-        net_type = cfg["network"].pop("net_type", None)
+        net_type = cfg["network"]["net_type"]
+        network = get_network(net_type)
         encoder = get_encoder(**cfg["encoder"])
-        self.net = network(encoder, **cfg["network"]).to(device)
+        network_config = {k: v for k, v in cfg["network"].items() if k != "net_type"}
+        self.net = network(encoder, **network_config).to(device)
         self.grad_vars = list(self.net.parameters())
-        cfg["network"]["net_type"] = net_type
 
         # Optimizer with memory-efficient settings
         weight_decay_val = cfg["train"].get("weight_decay", 1e-6)

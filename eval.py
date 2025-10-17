@@ -130,6 +130,59 @@ def compute_chamfer_distance(
     return chamfer_distance
 
 
+def compute_iou(
+    label: np.ndarray,
+    output: np.ndarray,
+    threshold_label: float = 0.5,
+    threshold_output: float = 0.5
+) -> float:
+    """Computes Intersection over Union (IoU) between binary volumes."""
+    label_bin = (label >= threshold_label).astype(np.uint8)
+    output_bin = (output >= threshold_output).astype(np.uint8)
+    
+    intersection = np.sum(label_bin & output_bin)
+    union = np.sum(label_bin | output_bin)
+    
+    return intersection / union if union != 0 else 0.0
+
+
+def compute_cldice(
+    label: np.ndarray,
+    output: np.ndarray,
+    threshold_label: float = 0.5,
+    threshold_output: float = 0.5
+) -> float:
+    """Computes centerline Dice (clDice) for tubular structures."""
+    try:
+        from skimage.morphology import skeletonize
+        
+        label_bin = (label >= threshold_label).astype(np.uint8)
+        output_bin = (output >= threshold_output).astype(np.uint8)
+        
+        if np.sum(label_bin) == 0 or np.sum(output_bin) == 0:
+            return 0.0
+        
+        label_skel = skeletonize(label_bin).astype(np.uint8)
+        output_skel = skeletonize(output_bin).astype(np.uint8)
+        
+        intersection = np.sum(label_skel & output_skel)
+        union = np.sum(label_skel) + np.sum(output_skel)
+        
+        return (2 * intersection) / union if union != 0 else 0.0
+    except:
+        return 0.0
+
+
+def compute_reconstruction_error(label: np.ndarray, output: np.ndarray) -> float:
+    """Computes reconstruction error (L1 norm) between volumes."""
+    return np.mean(np.abs(label - output))
+
+
+def compute_remse(label: np.ndarray, output: np.ndarray) -> float:
+    """Computes voxel-wise root mean squared error (reMSE)."""
+    return np.sqrt(np.mean((label - output) ** 2))
+
+
 def compute_all_metrics(
     label: np.ndarray,
     output: np.ndarray,
@@ -167,18 +220,16 @@ def compute_all_metrics(
             voxel_spacing=voxel_spacing
         )
         
-        metrics['ot_1mm'] = compute_overlap_metric(
-            label, output, d=1.0, 
-            threshold_output=threshold_output, 
-            threshold_label=threshold_label, 
-            voxel_spacing=voxel_spacing
+        metrics['iou'] = compute_iou(
+            label, output,
+            threshold_label=threshold_label,
+            threshold_output=threshold_output
         )
         
-        metrics['ot_2mm'] = compute_overlap_metric(
-            label, output, d=2.0, 
-            threshold_output=threshold_output, 
-            threshold_label=threshold_label, 
-            voxel_spacing=voxel_spacing
+        metrics['cldice'] = compute_cldice(
+            label, output,
+            threshold_label=threshold_label,
+            threshold_output=threshold_output
         )
         
         metrics['chamfer_distance'] = compute_chamfer_distance(
@@ -188,6 +239,11 @@ def compute_all_metrics(
             threshold_output=threshold_output, 
             threshold_label=threshold_label
         )
+        
+        metrics['reconstruction_error'] = compute_reconstruction_error(label, output)
+        
+        metrics['remse'] = compute_remse(label, output)
+        
         # Add additional useful metrics
         label_bin = (label >= threshold_label).astype(np.uint8)
         output_bin = (output >= threshold_output).astype(np.uint8)
@@ -200,9 +256,11 @@ def compute_all_metrics(
         print(f"Error computing metrics: {str(e)}")
         metrics = {
             'dice': np.nan,
-            'ot_1mm': np.nan,
-            'ot_2mm': np.nan,
+            'iou': np.nan,
+            'cldice': np.nan,
             'chamfer_distance': np.nan,
+            'reconstruction_error': np.nan,
+            'remse': np.nan,
             'label_volume': np.nan,
             'output_volume': np.nan,
             'volume_ratio': np.nan
@@ -275,7 +333,7 @@ def evaluate_single_model(
             **metrics
         }
 
-        print(f"  ✅ Success: Dice={metrics['dice']:.4f}, Ot(1mm)={metrics['ot_1mm']:.4f}, Ot(2mm)={metrics['ot_2mm']:.4f}, Chamfer={metrics['chamfer_distance']:.4f}mm")
+        print(f"  ✅ Success: Dice={metrics['dice']:.4f}, IoU={metrics['iou']:.4f}, clDice={metrics['cldice']:.4f}, Chamfer={metrics['chamfer_distance']:.4f}mm, RError={metrics['reconstruction_error']:.4f}, reMSE={metrics['remse']:.4f}")
 
     except Exception as e:
         print(f"  ❌ Error: {str(e)}")
@@ -286,9 +344,11 @@ def evaluate_single_model(
             'evaluation_success': False,
             'error_message': str(e),
             'dice': np.nan,
-            'ot_1mm': np.nan,
-            'ot_2mm': np.nan,
+            'iou': np.nan,
+            'cldice': np.nan,
             'chamfer_distance': np.nan,
+            'reconstruction_error': np.nan,
+            'remse': np.nan,
             'label_volume': np.nan,
             'output_volume': np.nan,
             'volume_ratio': np.nan
@@ -454,12 +514,16 @@ def batch_evaluate_models(
             'statistics': {
                 'dice_mean': float(successful_results['dice'].mean()),
                 'dice_std': float(successful_results['dice'].std()),
-                'ot_1mm_mean': float(successful_results['ot_1mm'].mean()),
-                'ot_1mm_std': float(successful_results['ot_1mm'].std()),
-                'ot_2mm_mean': float(successful_results['ot_2mm'].mean()),
-                'ot_2mm_std': float(successful_results['ot_2mm'].std()),
+                'iou_mean': float(successful_results['iou'].mean()),
+                'iou_std': float(successful_results['iou'].std()),
+                'cldice_mean': float(successful_results['cldice'].mean()),
+                'cldice_std': float(successful_results['cldice'].std()),
                 'chamfer_distance_mean': float(successful_results['chamfer_distance'].mean()),
-                'chamfer_distance_std': float(successful_results['chamfer_distance'].std())
+                'chamfer_distance_std': float(successful_results['chamfer_distance'].std()),
+                'reconstruction_error_mean': float(successful_results['reconstruction_error'].mean()),
+                'reconstruction_error_std': float(successful_results['reconstruction_error'].std()),
+                'remse_mean': float(successful_results['remse'].mean()),
+                'remse_std': float(successful_results['remse'].std())
             }
         }
         
@@ -482,9 +546,11 @@ def batch_evaluate_models(
         
         print(f"\n📊 Performance Statistics (based on {successful_evaluations} successful evaluations):")
         print(f"Dice Score:       {successful_results['dice'].mean():.4f} ± {successful_results['dice'].std():.4f}")
-        print(f"Ot(1mm):          {successful_results['ot_1mm'].mean():.4f} ± {successful_results['ot_1mm'].std():.4f}")
-        print(f"Ot(2mm):          {successful_results['ot_2mm'].mean():.4f} ± {successful_results['ot_2mm'].std():.4f}")
+        print(f"IoU:              {successful_results['iou'].mean():.4f} ± {successful_results['iou'].std():.4f}")
+        print(f"clDice:           {successful_results['cldice'].mean():.4f} ± {successful_results['cldice'].std():.4f}")
         print(f"Chamfer Dist:     {successful_results['chamfer_distance'].mean():.4f} ± {successful_results['chamfer_distance'].std():.4f} mm")
+        print(f"Recon Error:      {successful_results['reconstruction_error'].mean():.4f} ± {successful_results['reconstruction_error'].std():.4f}")
+        print(f"reMSE:            {successful_results['remse'].mean():.4f} ± {successful_results['remse'].std():.4f}")
     
     if failed_evaluations > 0:
         print(f"\n❌ Failed models: {df_results[~df_results['evaluation_success']]['model_id'].tolist()}")
