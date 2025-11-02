@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3 
 """
 Batch processing script for training NeCA on multiple 3D models.
 This script processes all models specified in the configuration file.
